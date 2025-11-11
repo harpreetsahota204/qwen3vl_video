@@ -67,7 +67,7 @@ OPERATIONS = {
   "objects": [{"name": "object name", "first_appears": "mm:ss.ff", "last_appears": "mm:ss.ff"}],
   "events": [{"start": "mm:ss.ff", "end": "mm:ss.ff", "description": "..."}],
   "text_content": [{"start": "mm:ss.ff", "end": "mm:ss.ff", "text": "..."}],
-  "scene_info": {"setting": "...", "time_of_day": "...", "location_type": "..."},
+  "scene_info": {"setting": "<one-word-description-of-setting>", "time_of_day": "<one-word-description-of-time>", "location_type": "<one-word-description-of-location>"},
   "object_count": {"count": number, "activities": [...]}
 }"""
     },
@@ -80,16 +80,14 @@ Provide in JSON format with 'mm:ss.ff' format:
 [{"start": "mm:ss.ff", "end": "mm:ss.ff", "description": "..."}]"""
     },
     "tracking": {
-        "prompt": """Track all objects in this video.
-For each frame where objects appear, provide:
+        "prompt": """Track all objects in this video. For each frame where objects appear, provide:
 - time: timestamp (mm:ss.ff)
 - bbox_2d: bounding box as [x_min, y_min, x_max, y_max] in 0-1000 scale
 - label: object label
 Output in JSON: [{"time": "mm:ss.ff", "bbox_2d": [...], "label": "..."}, ...]"""
     },
     "ocr": {
-        "prompt": """Extract all text appearing in this video.
-For each text instance, provide:
+        "prompt": """Extract all text appearing in this video. For each text instance, provide:
 - time: timestamp (mm:ss.ff)
 - text: the actual text content
 - bbox_2d: bounding box as [x_min, y_min, x_max, y_max] in 0-1000 scale
