@@ -63,12 +63,12 @@ OPERATIONS = {
         "prompt": """Analyze this video comprehensively in JSON format:
 
 {
-  "summary": "Brief 2-3 sentence description",
+  "summary": "Brief description of the video",
   "objects": [{"name": "object name", "first_appears": "mm:ss.ff", "last_appears": "mm:ss.ff"}],
-  "events": [{"start": "mm:ss.ff", "end": "mm:ss.ff", "description": "..."}],
-  "text_content": [{"start": "mm:ss.ff", "end": "mm:ss.ff", "text": "..."}],
+  "events": [{"start": "mm:ss.ff", "end": "mm:ss.ff", "description": "event description"}],
+  "text_content": [{"start": "mm:ss.ff", "end": "mm:ss.ff", "text": "text content"}],
   "scene_info": {"setting": "<one-word-description-of-setting>", "time_of_day": "<one-word-description-of-time>", "location_type": "<one-word-description-of-location>"},
-  "object_count": {"count": number, "activities": [...]}
+  "activities": {"primary_activity": "activity name", "secondary_activities": "comma-separated activities"}
 }"""
     },
     "description": {
@@ -564,7 +564,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         # Step 4: Prepare final model inputs and move to device
         # Tokenizes text and prepares vision tensors
-        # Use model's actual device (from device_map="auto")
+        # Use model's actual device 
         device = next(self._model.parameters()).device
         inputs = self._processor(
             text=[text],
@@ -610,7 +610,151 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         )
         
         return output_text[0]
+
+    def _extract_json(self, text):
+        """Extract JSON from model output.
+        
+        Handles two common formats:
+        1. JSON wrapped in markdown code blocks: ```json {...} ```
+        2. Raw JSON text
+        
+        Args:
+            text (str): Model output text
+        
+        Returns:
+            dict/list or None: Parsed JSON object, or None if parsing fails
+        """
+        # Try to find JSON in markdown code block first
+        json_match = re.search(r'```json\s*(\{.*?\}|\[.*?\])\s*```', text, re.DOTALL)
+        json_str = json_match.group(1) if json_match else text
+        
+        # Attempt to parse JSON
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+
+    def _has_keys(self, item, required_keys):
+        """Check if item is dict with all required keys.
+        
+        Used for automatic type detection based on JSON structure.
+        
+        Args:
+            item: Item to check (typically dict)
+            required_keys (list): List of required key names
+        
+        Returns:
+            bool: True if item is dict and has all required keys
+        """
+        return isinstance(item, dict) and all(k in item for k in required_keys)
+
+    def _parse_list_value(self, key, value, labels, video_path, sample):
+        """Dispatch list parsing based on item structure.
+        
+        Examines the first item in the list to determine type, then parses accordingly:
+        - Temporal events: Items with "start", "end", "description" keys
+        - Object appearances: Items with "name", "first_appears", "last_appears" keys
+        - Text content: Items with "start", "end", "text" keys
+        - Object detections: Items with "time", "bbox_2d", "label" keys
+        - OCR detections: Items with "time", "text", "bbox_2d" keys
+        
+        Args:
+            key (str): JSON key name (becomes field name)
+            value (list): List of items to parse
+            labels (dict): Labels dict to update (modified in place)
+            video_path (str): Path to video file
+            sample (fo.Sample): FiftyOne sample
+        """
+        first = value[0]
+        
+        # Check structure of first item to determine type
+        if self._has_keys(first, ["start", "end", "description"]):
+            # Temporal events - sample-level TemporalDetections
+            events = self._parse_temporal_events(value, sample)
+            if events:
+                labels[key] = events
+        elif self._has_keys(first, ["name", "first_appears", "last_appears"]):
+            # Object appearances - convert to temporal detections
+            events = self._parse_object_appearances(value, sample)
+            if events:
+                labels[key] = events
+        elif self._has_keys(first, ["start", "end", "text"]):
+            # Text content temporal - convert to temporal detections
+            events = self._parse_text_temporal(value, sample)
+            if events:
+                labels[key] = events
+        elif self._has_keys(first, ["time", "bbox_2d", "label"]):
+            # Object detections - frame-level Detections
+            self._merge_frame_labels(labels, self._parse_frame_detections(value, video_path, sample), key)
+        elif self._has_keys(first, ["time", "text", "bbox_2d"]):
+            # OCR detections - frame-level Detections with text attribute
+            self._merge_frame_labels(labels, self._parse_frame_detections(value, video_path, sample, "text", "text"), key)
     
+    def _parse_dict_value(self, key, value, labels):
+        """Parse dict values as multiple Classifications.
+        
+        Used for nested structures like scene_info and activities where each key-value pair
+        becomes a separate Classification or Classifications (for comma-separated values).
+        
+        Example:
+            Input: {"setting": "indoor", "time_of_day": "night"}
+            Output: 
+                labels["scene_info_setting"] = fo.Classification(label="Indoor")
+                labels["scene_info_time_of_day"] = fo.Classification(label="Night")
+        
+        For comma-separated values (activities):
+            Input: {"primary_activity": "walking", "secondary_activities": "talking, gesturing"}
+            Output:
+                labels["activities_primary_activity"] = fo.Classification(label="Walking")
+                labels["activities_secondary_activities"] = fo.Classifications(
+                    classifications=[
+                        fo.Classification(label="Talking"),
+                        fo.Classification(label="Gesturing")
+                    ]
+                )
+        
+        Args:
+            key (str): Parent key name (e.g., "scene_info", "activities")
+            value (dict): Dict with key-value pairs
+            labels (dict): Labels dict to update (modified in place)
+        """
+        for subkey, subvalue in value.items():
+            field_name = f"{key}_{subkey}"
+            
+            # Check if value contains comma-separated items (multiple activities)
+            if isinstance(subvalue, str) and ',' in subvalue:
+                # Parse comma-separated values as multiple Classifications
+                items = [item.strip().capitalize() for item in subvalue.split(',')]
+                labels[field_name] = fol.Classifications(
+                    classifications=[fol.Classification(label=item) for item in items if item]
+                )
+            else:
+                # Single value - convert to sentence case
+                label_text = str(subvalue).capitalize()
+                labels[field_name] = fol.Classification(label=label_text)
+
+    def _is_simple_dict(self, value):
+        """Check if dict has only simple string/number values (not lists or nested dicts).
+        
+        Used to determine if a dict like scene_info should be parsed as Classifications,
+        or if it's a complex structure like object_count that should be skipped.
+        
+        Args:
+            value (dict): Dictionary to check
+        
+        Returns:
+            bool: True if all values are strings or numbers
+        """
+        if not isinstance(value, dict):
+            return False
+        
+        for v in value.values():
+            # Allow strings and numbers, reject lists and dicts
+            if not isinstance(v, (str, int, float, bool)):
+                return False
+        
+        return True
+
     def _parse_output(self, output_text, video_path, sample):
         """Parse model output into FiftyOne labels.
         
@@ -685,71 +829,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         return labels
     
-    def _parse_list_value(self, key, value, labels, video_path, sample):
-        """Dispatch list parsing based on item structure.
-        
-        Examines the first item in the list to determine type, then parses accordingly:
-        - Temporal events: Items with "start", "end", "description" keys
-        - Object appearances: Items with "name", "first_appears", "last_appears" keys
-        - Text content: Items with "start", "end", "text" keys
-        - Object detections: Items with "time", "bbox_2d", "label" keys
-        - OCR detections: Items with "time", "text", "bbox_2d" keys
-        
-        Args:
-            key (str): JSON key name (becomes field name)
-            value (list): List of items to parse
-            labels (dict): Labels dict to update (modified in place)
-            video_path (str): Path to video file
-            sample (fo.Sample): FiftyOne sample
-        """
-        first = value[0]
-        
-        # Check structure of first item to determine type
-        if self._has_keys(first, ["start", "end", "description"]):
-            # Temporal events - sample-level TemporalDetections
-            events = self._parse_temporal_events(value, video_path, sample)
-            if events:
-                labels[key] = events
-        elif self._has_keys(first, ["name", "first_appears", "last_appears"]):
-            # Object appearances - convert to temporal detections
-            events = self._parse_object_appearances(value, video_path, sample)
-            if events:
-                labels[key] = events
-        elif self._has_keys(first, ["start", "end", "text"]):
-            # Text content temporal - convert to temporal detections
-            events = self._parse_text_temporal(value, video_path, sample)
-            if events:
-                labels[key] = events
-        elif self._has_keys(first, ["time", "bbox_2d", "label"]):
-            # Object detections - frame-level Detections
-            self._merge_frame_labels(labels, self._parse_frame_detections(value, video_path, sample), key)
-        elif self._has_keys(first, ["time", "text", "bbox_2d"]):
-            # OCR detections - frame-level Detections with text attribute
-            self._merge_frame_labels(labels, self._parse_frame_detections(value, video_path, sample, "text", "text"), key)
-    
-    def _parse_dict_value(self, key, value, labels):
-        """Parse dict values as multiple Classifications.
-        
-        Used for nested structures like scene_info where each key-value pair
-        becomes a separate Classification. Values are converted to sentence case.
-        
-        Example:
-            Input: {"setting": "indoor", "time_of_day": "night"}
-            Output: 
-                labels["scene_info_setting"] = fo.Classification(label="Indoor")
-                labels["scene_info_time_of_day"] = fo.Classification(label="Night")
-        
-        Args:
-            key (str): Parent key name (e.g., "scene_info")
-            value (dict): Dict with key-value pairs
-            labels (dict): Labels dict to update (modified in place)
-        """
-        for subkey, subvalue in value.items():
-            # Convert value to string and apply sentence case
-            label_text = str(subvalue).capitalize()
-            # Create field name: parent_key + "_" + subkey
-            field_name = f"{key}_{subkey}"
-            labels[field_name] = fol.Classification(label=label_text)
+
     
     def _merge_frame_labels(self, labels, frame_detections, key):
         """Merge frame-level detections into labels dict.
@@ -769,66 +849,8 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             # Add detections under field name
             labels[frame_num][key] = dets
     
-    def _extract_json(self, text):
-        """Extract JSON from model output.
-        
-        Handles two common formats:
-        1. JSON wrapped in markdown code blocks: ```json {...} ```
-        2. Raw JSON text
-        
-        Args:
-            text (str): Model output text
-        
-        Returns:
-            dict/list or None: Parsed JSON object, or None if parsing fails
-        """
-        # Try to find JSON in markdown code block first
-        json_match = re.search(r'```json\s*(\{.*?\}|\[.*?\])\s*```', text, re.DOTALL)
-        json_str = json_match.group(1) if json_match else text
-        
-        # Attempt to parse JSON
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
     
-    def _has_keys(self, item, required_keys):
-        """Check if item is dict with all required keys.
-        
-        Used for automatic type detection based on JSON structure.
-        
-        Args:
-            item: Item to check (typically dict)
-            required_keys (list): List of required key names
-        
-        Returns:
-            bool: True if item is dict and has all required keys
-        """
-        return isinstance(item, dict) and all(k in item for k in required_keys)
-    
-    def _is_simple_dict(self, value):
-        """Check if dict has only simple string/number values (not lists or nested dicts).
-        
-        Used to determine if a dict like scene_info should be parsed as Classifications,
-        or if it's a complex structure like object_count that should be skipped.
-        
-        Args:
-            value (dict): Dictionary to check
-        
-        Returns:
-            bool: True if all values are strings or numbers
-        """
-        if not isinstance(value, dict):
-            return False
-        
-        for v in value.values():
-            # Allow strings and numbers, reject lists and dicts
-            if not isinstance(v, (str, int, float, bool)):
-                return False
-        
-        return True
-    
-    def _parse_object_appearances(self, objects_list, video_path, sample):
+    def _parse_object_appearances(self, objects_list, sample):
         """Parse object appearances into TemporalDetections.
         
         Converts object appearance/disappearance times into temporal detections.
@@ -843,7 +865,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Args:
             objects_list (list): List of dicts with "name", "first_appears", "last_appears"
-            video_path (str): Path to video file
             sample (fo.Sample): FiftyOne sample for metadata
         
         Returns:
@@ -881,7 +902,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             return fol.TemporalDetections(detections=detections)
         return None
     
-    def _parse_text_temporal(self, text_list, video_path, sample):
+    def _parse_text_temporal(self, text_list, sample):
         """Parse text content temporal ranges into TemporalDetections.
         
         Converts text visibility periods into temporal detections.
@@ -896,7 +917,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Args:
             text_list (list): List of dicts with "start", "end", "text"
-            video_path (str): Path to video file
             sample (fo.Sample): FiftyOne sample for metadata
         
         Returns:
@@ -934,7 +954,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             return fol.TemporalDetections(detections=detections)
         return None
     
-    def _parse_temporal_events(self, events_list, video_path, sample):
+    def _parse_temporal_events(self, events_list, sample):
         """Parse temporal events into TemporalDetections.
         
         Converts model's timestamp-based events into FiftyOne's frame-based
@@ -950,7 +970,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Args:
             events_list (list): List of dicts with "start", "end", "description" keys
-            video_path (str): Path to video file (for FPS fallback)
             sample (fo.Sample): FiftyOne sample (must have metadata for timestamp conversion)
         
         Returns:
