@@ -381,7 +381,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         # Prepare model loading kwargs with optimizations
         model_kwargs = {
-            "torch_dtype": "auto",
+            "dtype": "auto",
             "device_map": "auto"
         }
         
