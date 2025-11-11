@@ -1,0 +1,84 @@
+{
+    "name": "qwen3vl-video",
+    "url": "https://github.com/harpreetsahota204/qwen3vl_video",
+    "models": [
+        {
+            "base_name": "Qwen/Qwen3-VL-8B-Instruct",
+            "base_filename":"Qwen3-VL-8B-Instruct",
+            "author": "Qwen",
+            "license": "Apache-2.0",
+            "source": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct",
+            "description": "Qwen3-VL is a multimodal vision-language model that processes and understands both text and visual input, enabling it to analyze images, video, and perform advanced reasoning and tasks involving both modalities.",
+            "tags": [
+                "classification",
+                "detections",
+                "torch",
+                "temporal-detections",
+                "zero-shot",
+                "video"
+            ],
+            "date_added": "2025-11-10",
+            "requirements": {
+                "packages": ["huggingface-hub","transformers", "torch", "torchvision",  "qwen-vl-utils", "decord"],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            }
+        },
+        {
+            "base_name": "Qwen/Qwen3-VL-4B-Instruct",
+            "base_filename":"Qwen3-VL-4B-Instruct",
+            "author": "Qwen",
+            "license": "Apache-2.0",
+            "source": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct",
+            "description": "Qwen3-VL is a multimodal vision-language model that processes and understands both text and visual input, enabling it to analyze images, video, and perform advanced reasoning and tasks involving both modalities.",
+            "tags": [
+                "classification",
+                "detections",
+                "torch",
+                "temporal-detections",
+                "zero-shot",
+                "video"
+            ],
+            "date_added": "2025-11-10",
+            "requirements": {
+                "packages": ["huggingface-hub","transformers", "torch", "torchvision",  "qwen-vl-utils", "decord"],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            }
+        },
+        {
+            "base_name": "Qwen/Qwen3-VL-2B-Instruct",
+            "base_filename":"Qwen3-VL-2B-Instruct",
+            "author": "Qwen",
+            "license": "Apache-2.0",
+            "source": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct",
+            "description": "Qwen3-VL is a multimodal vision-language model that processes and understands both text and visual input, enabling it to analyze images, video, and perform advanced reasoning and tasks involving both modalities.",
+            "tags": [
+                "classification",
+                "detections",
+                "torch",
+                "temporal-detections",
+                "zero-shot",
+                "video"
+            ],
+            "date_added": "2025-11-10",
+            "requirements": {
+                "packages": ["huggingface-hub","transformers", "torch", "torchvision",  "qwen-vl-utils", "decord"],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            }
+        }
+   ]
+}
