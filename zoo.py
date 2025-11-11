@@ -691,10 +691,14 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             self._merge_frame_labels(labels, self._parse_frame_detections(value, video_path, sample, "text", "text"), key)
     
     def _parse_dict_value(self, key, value, labels):
-        """Parse dict values as multiple Classifications.
+        """Parse dict values as Classifications.
         
         Used for nested structures like scene_info and activities where each key-value pair
-        becomes a separate Classification or Classifications (for comma-separated values).
+        becomes a separate field. 
+        
+        Special handling:
+        - Fields ending with "activities" (plural) are parsed as fo.Classifications (comma-separated)
+        - All other fields are parsed as fo.Classification (single value)
         
         Example:
             Input: {"setting": "indoor", "time_of_day": "night"}
@@ -702,16 +706,14 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 labels["scene_info_setting"] = fo.Classification(label="Indoor")
                 labels["scene_info_time_of_day"] = fo.Classification(label="Night")
         
-        For comma-separated values (activities):
+        For activities:
             Input: {"primary_activity": "walking", "secondary_activities": "talking, gesturing"}
             Output:
                 labels["activities_primary_activity"] = fo.Classification(label="Walking")
-                labels["activities_secondary_activities"] = fo.Classifications(
-                    classifications=[
-                        fo.Classification(label="Talking"),
-                        fo.Classification(label="Gesturing")
-                    ]
-                )
+                labels["activities_secondary_activities"] = fo.Classifications([
+                    fo.Classification(label="Talking"),
+                    fo.Classification(label="Gesturing")
+                ])
         
         Args:
             key (str): Parent key name (e.g., "scene_info", "activities")
@@ -721,15 +723,22 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         for subkey, subvalue in value.items():
             field_name = f"{key}_{subkey}"
             
-            # Check if value contains comma-separated items (multiple activities)
-            if isinstance(subvalue, str) and ',' in subvalue:
+            # Special handling for fields ending in "activities" (plural) - parse as Classifications
+            if subkey.endswith("activities"):
                 # Parse comma-separated values as multiple Classifications
-                items = [item.strip().capitalize() for item in subvalue.split(',')]
-                labels[field_name] = fol.Classifications(
-                    classifications=[fol.Classification(label=item) for item in items if item]
-                )
+                if isinstance(subvalue, str):
+                    items = [item.strip().capitalize() for item in subvalue.split(',') if item.strip()]
+                    labels[field_name] = fol.Classifications(
+                        classifications=[fol.Classification(label=item) for item in items]
+                    )
+                else:
+                    # Single value - still wrap in Classifications for consistency
+                    label_text = str(subvalue).capitalize()
+                    labels[field_name] = fol.Classifications(
+                        classifications=[fol.Classification(label=label_text)]
+                    )
             else:
-                # Single value - convert to sentence case
+                # Regular fields - single Classification
                 label_text = str(subvalue).capitalize()
                 labels[field_name] = fol.Classification(label=label_text)
 
