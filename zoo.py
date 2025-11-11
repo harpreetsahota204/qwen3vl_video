@@ -144,6 +144,9 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
             
         repetition_penalty (float): Penalty for repeating tokens
             Default: 1.0 (no penalty)
+            
+        presence_penalty (float): Penalty for tokens that have already appeared
+            Controls diversity of generated content. Default: 1.5
         
         # Operation configuration
         operation (str): Operation type - selects default prompt from OPERATIONS dict
@@ -208,15 +211,17 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         # Maximum length of generated response
         self.max_new_tokens = self.parse_number(d, "max_new_tokens", default=8192)
         # Use sampling (True) vs greedy decoding (False)
-        self.do_sample = self.parse_bool(d, "do_sample", default=False)
-        # Sampling temperature - higher = more creative (only if do_sample=True)
-        self.temperature = self.parse_number(d, "temperature", default=0.7)
-        # Nucleus sampling threshold (only if do_sample=True)
+        self.do_sample = self.parse_bool(d, "do_sample", default=True)
+        # Sampling temperature - higher = more creative (only if do_sample=True), value based on model card
+        self.temperature = self.parse_number(d, "temperature", default=0.7) 
+        # Nucleus sampling threshold (only if do_sample=True), value based on model card
         self.top_p = self.parse_number(d, "top_p", default=0.8)
-        # Top-k sampling parameter (only if do_sample=True)
+        # Top-k sampling parameter (only if do_sample=True), value based on model card
         self.top_k = self.parse_number(d, "top_k", default=20)
-        # Penalty for token repetition
+        # Penalty for token repetition, value based on model card
         self.repetition_penalty = self.parse_number(d, "repetition_penalty", default=1.0)
+        # Penalty for tokens that have already appeared, value based on model card
+        self.presence_penalty = self.parse_number(d, "presence_penalty", default=1.5)
         
         # Operation configuration
         # Selects default prompt from OPERATIONS dict
@@ -580,6 +585,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 "max_new_tokens": self.config.max_new_tokens,
                 "do_sample": self.config.do_sample,
                 "repetition_penalty": self.config.repetition_penalty,
+                "presence_penalty": self.config.presence_penalty,
             }
             
             # Add sampling parameters if using sampling (not greedy)
