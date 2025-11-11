@@ -129,7 +129,7 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
             Default: 8192. Increase for longer/more detailed outputs.
             
         do_sample (bool): Whether to use sampling (True) vs greedy decoding (False)
-            Default: False (greedy decoding for deterministic outputs)
+            Default: True (greedy decoding for deterministic outputs)
             
         temperature (float): Sampling temperature (only used if do_sample=True)
             Higher = more creative/random. Default: 0.7
@@ -382,7 +382,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         # Prepare model loading kwargs with optimizations
         model_kwargs = {
             "dtype": "auto",
-            "device_map": "auto"
+            "device_map": self.device
         }
         
         # Enable Flash Attention 2 if using CUDA and it's available
