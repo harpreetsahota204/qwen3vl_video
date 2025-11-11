@@ -219,7 +219,7 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         # Penalty for token repetition, value based on model card
         self.repetition_penalty = self.parse_number(d, "repetition_penalty", default=1.0)
         # Penalty for tokens that have already appeared, value based on model card
-        self.presence_penalty = self.parse_number(d, "presence_penalty", default=1.5)
+        # self.presence_penalty = self.parse_number(d, "presence_penalty", default=1.5)
         
         # Operation configuration
         # Selects default prompt from OPERATIONS dict
@@ -583,7 +583,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 "max_new_tokens": self.config.max_new_tokens,
                 "do_sample": self.config.do_sample,
                 "repetition_penalty": self.config.repetition_penalty,
-                "presence_penalty": self.config.presence_penalty,
+                # "presence_penalty": self.config.presence_penalty,
             }
             
             # Add sampling parameters if using sampling (not greedy)
