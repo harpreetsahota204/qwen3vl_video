@@ -32,6 +32,8 @@ import fiftyone.utils.torch as fout
 from transformers import AutoProcessor, AutoModelForVision2Seq
 from transformers.utils.import_utils import is_flash_attn_2_available
 
+from qwen_vl_utils import process_vision_info
+
 logger = logging.getLogger(__name__)
 
 
@@ -402,12 +404,15 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         logger.info("Model loaded successfully")
     
-    def predict(self, video_path, sample=None):
+    def predict(self, arg, sample=None):
         """Run inference on a video file.
         
         This is the main prediction method called by FiftyOne's apply_model() function.
         It processes a video and returns a dict with both sample-level and frame-level
         labels that FiftyOne automatically routes to the correct storage locations.
+        
+        Since this model inherits from SamplesMixin, it requires the sample parameter
+        to access the video filepath and metadata.
         
         Prompt Priority (in order):
         1. Sample field value (if needs_fields is configured)
@@ -415,9 +420,10 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         3. Default prompt for operation (from OPERATIONS dict)
         
         Args:
-            video_path (str): Path to video file to process
-            sample (fo.Sample, optional): FiftyOne sample for metadata and field access
+            arg: Unused (for compatibility with Model interface)
+            sample (fo.Sample): FiftyOne sample (required)
                 Used to:
+                - Get video filepath (sample.filepath)
                 - Get video FPS from metadata
                 - Read per-sample prompts if needs_fields is configured
                 - Convert timestamps to frame numbers for temporal detections
@@ -443,19 +449,24 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             - String keys with Label values → sample["{label_field}_{key}"] = Label
             - Integer keys → sample.frames[frame_num]["{label_field}_{field}"]
         """
-        logger.info(f"Processing video: {video_path}")
-        
         # Lazy load model on first use
         if self._model is None:
             logger.info("Model not loaded, loading now...")
             self._load_model()
+        
+        # Get video file path from sample (required for SamplesMixin models)
+        if sample is None:
+            raise ValueError("Sample is required for video processing")
+        
+        video_path = sample.filepath
+        logger.info(f"Processing video: {video_path}")
         
         # Validate metadata upfront for operations that need it
         needs_metadata = self.config.operation in [
             "comprehensive", "temporal_localization", "tracking", "ocr"
         ]
         
-        if needs_metadata and (sample is None or not hasattr(sample, 'metadata')):
+        if needs_metadata and not hasattr(sample, 'metadata'):
             raise ValueError(
                 f"Operation '{self.config.operation}' requires sample metadata for timestamp conversion. "
                 f"Call dataset.compute_metadata() before applying model."
@@ -465,7 +476,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         prompt = self.prompt  # Start with property (custom or operation default)
         
         # Override with sample field value if configured via needs_fields
-        if sample is not None and self._get_field() is not None:
+        if self._get_field() is not None:
             field_value = sample.get_field(self._get_field())
             if field_value is not None:
                 prompt = str(field_value)
@@ -521,7 +532,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Returns:
             str: Generated text output from model
         """
-        from qwen_vl_utils import process_vision_info
+        
         
         # Step 1: Apply chat template to format conversation
         # Converts messages to the format expected by the model
