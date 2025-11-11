@@ -211,7 +211,7 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         # Use sampling (True) vs greedy decoding (False)
         self.do_sample = self.parse_bool(d, "do_sample", default=True)
         # Sampling temperature - higher = more creative (only if do_sample=True), value based on model card
-        self.temperature = self.parse_number(d, "temperature", default=0.7) 
+        self.temperature = self.parse_number(d, "temperature", default=0.7)
         # Nucleus sampling threshold (only if do_sample=True), value based on model card
         self.top_p = self.parse_number(d, "top_p", default=0.8)
         # Top-k sampling parameter (only if do_sample=True), value based on model card
@@ -610,7 +610,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         )
         
         return output_text[0]
-
+    
     def _extract_json(self, text):
         """Extract JSON from model output.
         
@@ -763,7 +763,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 return False
         
         return True
-
+    
     def _parse_output(self, output_text, video_path, sample):
         """Parse model output into FiftyOne labels.
         
@@ -888,11 +888,14 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             first_sec = self._timestamp_to_seconds(obj.get("first_appears", "00:00.00"))
             last_sec = self._timestamp_to_seconds(obj.get("last_appears", "00:00.00"))
             
+            # Get object name and apply sentence case
+            object_name = str(obj.get("name", "object")).capitalize()
+            
             # Create temporal detection for object's presence duration
             try:
                 detection = fol.TemporalDetection.from_timestamps(
                     [first_sec, last_sec],
-                    label=obj.get("name", "object"),
+                    label=object_name,
                     sample=sample
                 )
                 detections.append(detection)
@@ -940,11 +943,14 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             start_sec = self._timestamp_to_seconds(text_item.get("start", "00:00.00"))
             end_sec = self._timestamp_to_seconds(text_item.get("end", "00:00.00"))
             
+            # Get text content and apply sentence case
+            text_label = str(text_item.get("text", "text")).capitalize()
+            
             # Create temporal detection for text visibility period
             try:
                 detection = fol.TemporalDetection.from_timestamps(
                     [start_sec, end_sec],
-                    label=text_item.get("text", "text"),
+                    label=text_label,
                     sample=sample
                 )
                 detections.append(detection)
@@ -980,7 +986,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Args:
             events_list (list): List of dicts with "start", "end", "description" keys
             sample (fo.Sample): FiftyOne sample (must have metadata for timestamp conversion)
-        
+            
         Returns:
             fo.TemporalDetections or None: Container with all temporal detections, or None if empty
         """
@@ -993,19 +999,22 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             start_sec = self._timestamp_to_seconds(event.get("start", "00:00.00"))
             end_sec = self._timestamp_to_seconds(event.get("end", "00:00.00"))
             
+            # Get event description and apply sentence case
+            event_label = str(event.get("description", "event")).capitalize()
+            
             # Use FiftyOne's from_timestamps() to convert seconds to frame numbers
             # This uses the sample's video metadata (FPS) for accurate conversion
             try:
                 detection = fol.TemporalDetection.from_timestamps(
                     [start_sec, end_sec],
-                    label=event.get("description", "event"),
+                    label=event_label,
                     sample=sample
                 )
                 detections.append(detection)
             except Exception as e:
                 logger.warning(f"Failed to create temporal detection: {e}")
                 continue
-        
+            
         # Alert if complete failure
         if not detections and events_list:
             logger.error(
