@@ -443,8 +443,11 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             - String keys with Label values → sample["{label_field}_{key}"] = Label
             - Integer keys → sample.frames[frame_num]["{label_field}_{field}"]
         """
+        logger.info(f"Processing video: {video_path}")
+        
         # Lazy load model on first use
         if self._model is None:
+            logger.info("Model not loaded, loading now...")
             self._load_model()
         
         # Validate metadata upfront for operations that need it
@@ -484,10 +487,21 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         }]
         
         # Run model inference
-        output_text = self._run_inference(messages)
+        try:
+            output_text = self._run_inference(messages)
+            logger.debug(f"Model output: {output_text[:200]}...")
+        except Exception as e:
+            logger.error(f"Inference failed for video {video_path}: {e}")
+            raise
         
         # Parse text output into FiftyOne label objects
-        labels = self._parse_output(output_text, video_path, sample)
+        try:
+            labels = self._parse_output(output_text, video_path, sample)
+            logger.debug(f"Parsed {len(labels)} label fields")
+        except Exception as e:
+            logger.error(f"Parsing failed for video {video_path}: {e}")
+            logger.error(f"Raw output was: {output_text[:500]}")
+            raise
         
         return labels
     
