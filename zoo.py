@@ -930,9 +930,13 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             elif self.config.operation == "ocr":
                 parsed_json = {"text_content": parsed_json}
             else:
-                # Unknown list type - skip parsing
-                logger.warning(f"Received list JSON but don't know how to parse for operation '{self.config.operation}'")
-                return {}
+                # Unknown list type for custom/other operations
+                # Return as raw text since we can't determine structure
+                logger.warning(
+                    f"Received list JSON for operation '{self.config.operation}'. "
+                    f"Expected dict format. Returning raw output as string."
+                )
+                return {"raw_output": str(parsed_json)}
         
         # Determine which keys to parse (all or selective)
         keys = self.config.output_keys or list(parsed_json.keys())
@@ -957,9 +961,21 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 else:
                     # Skip complex dicts that don't fit the scene_info pattern
                     logger.debug(f"Skipping complex dict for key '{key}'")
-            elif isinstance(value, list) and value:
+            elif isinstance(value, list):
                 # List values - detect structure and parse appropriately
-                self._parse_list_value(key, value, labels, video_path, sample)
+                if value:  # Non-empty list
+                    self._parse_list_value(key, value, labels, video_path, sample)
+                else:  # Empty list - store as None to indicate "no detections found"
+                    logger.debug(f"Empty list for key '{key}' - storing as None")
+                    labels[key] = None
+        
+        # Safety check: never return completely empty dict (causes StopIteration in FiftyOne)
+        if not labels:
+            logger.warning(
+                f"Parsing produced no labels. Returning raw output as string. "
+                f"Check that output_keys match model output keys."
+            )
+            return {"raw_output": output_text}
         
         return labels
     
