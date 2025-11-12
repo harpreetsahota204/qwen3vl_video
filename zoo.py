@@ -355,6 +355,20 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             raise ValueError("Cannot set prompt for predefined operations. Use operation='custom'")
         self.config.custom_prompt = value
     
+    @property
+    def custom_prompt(self):
+        """Get custom prompt (alias for prompt property, for clarity)."""
+        if self.config.operation != "custom":
+            raise ValueError("custom_prompt only accessible when operation='custom'")
+        return self.config.custom_prompt
+    
+    @custom_prompt.setter
+    def custom_prompt(self, value):
+        """Set custom prompt (only valid for custom operation)."""
+        if self.config.operation != "custom":
+            raise ValueError("custom_prompt only allowed when operation='custom'")
+        self.config.custom_prompt = value
+    
     def _load_model(self):
         """Load Qwen3-VL model and processor from HuggingFace.
         
@@ -720,8 +734,12 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             dict: Mixed sample-level (string keys) and frame-level (int keys) labels
         """
         # Operations that return plain text (no JSON parsing)
-        if self.config.operation in ["description", "custom"]:
+        if self.config.operation == "description":
             return {"summary": output_text}
+        
+        if self.config.operation == "custom":
+            # For custom operation, return as "result" to avoid unwanted field suffixes
+            return {"result": output_text}
         
         # Operations that require JSON parsing
         json_data = self._extract_json(output_text)
