@@ -93,15 +93,6 @@ Output in JSON: [{"time": "mm:ss.ff", "bbox_2d": [...], "label": "..."}, ...]"""
 - bbox_2d: bounding box as [x_min, y_min, x_max, y_max] in 0-1000 scale
 Output in JSON: [{"time": "mm:ss.ff", "text": "...", "bbox_2d": [...]}, ...]"""
     },
-    "custom": {
-        "prompt": None,  # Must provide custom_prompt
-        "description": "Advanced mode: full control over prompt and parsing. Requires explicit custom_prompt and require_metadata settings."
-    }
-}
-
-# Operations that require video metadata for timestamp conversion
-METADATA_REQUIRED_OPERATIONS = {
-    "comprehensive", "temporal_localization", "tracking", "ocr"
 }
 
 
@@ -157,38 +148,18 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         
         # Operation configuration
         operation (str): Operation type - selects default prompt from OPERATIONS dict
-            Preset operations (validated, predictable):
+            Options:
             - "comprehensive": All analysis types (summary, events, tracking, OCR)
             - "description": Video description only
             - "temporal_localization": Event detection with timestamps
             - "tracking": Object tracking with bounding boxes
             - "ocr": Text extraction with locations
-            
-            Advanced mode (flexible, requires explicit configuration):
-            - "custom": Full control over prompt and parsing behavior
-                       Requires: custom_prompt and require_metadata to be set
-            
             Default: "comprehensive"
             
         custom_prompt (str): Custom prompt to override default operation prompt
             If provided, this prompt is used instead of OPERATIONS[operation]["prompt"]
-            For operation="custom", this parameter is REQUIRED.
             Allows full flexibility for custom analysis tasks.
             Default: None (uses operation default)
-        
-        # Custom mode configuration (only relevant for operation="custom")
-        require_metadata (bool): Whether video metadata is required for parsing
-            - True: Validates metadata exists before inference (for temporal/spatial data)
-            - False: No metadata validation (for description-only tasks)
-            - None: Not set (raises error for operation="custom")
-            Only used when operation="custom". Preset operations auto-determine this.
-            Default: None
-            
-        parsing_mode (str): How to handle parsing failures
-            - "strict": Raise exceptions on any parsing error (fail fast)
-            - "flexible": Log warnings and skip failed parsing, degrade gracefully
-            - "permissive": Skip failed items silently with debug logs
-            Default: "strict" for preset operations, "flexible" for custom mode
         
         # Output configuration
         output_keys (list): List of JSON keys to parse from model output
@@ -198,7 +169,7 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
             Default: None (parse all)
     
     Example:
-        # Preset operation: Comprehensive analysis
+        # Comprehensive analysis with custom settings
         config = Qwen3VLVideoModelConfig({
             "model_path": "Qwen/Qwen3-VL-8B-Instruct",
             "operation": "comprehensive",
@@ -208,27 +179,10 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
             "output_keys": ["summary", "events", "objects"]  # Only parse these
         })
         
-        # Preset operation: Description only (no metadata needed)
+        # Custom prompt example
         config = Qwen3VLVideoModelConfig({
-            "operation": "description",
-            "max_new_tokens": 512
-        })
-        
-        # Custom mode: Temporal analysis with custom prompt
-        config = Qwen3VLVideoModelConfig({
-            "operation": "custom",
-            "custom_prompt": "Find all vehicles and people. Return JSON: [{start, end, description}]",
-            "require_metadata": True,  # Needed for temporal data
-            "parsing_mode": "flexible",  # Degrade gracefully on errors
-            "output_keys": ["events"]
-        })
-        
-        # Custom mode: Simple description with custom phrasing (no metadata)
-        config = Qwen3VLVideoModelConfig({
-            "operation": "custom",
-            "custom_prompt": "Describe this video in one sentence focusing on mood and atmosphere.",
-            "require_metadata": False,  # No temporal data needed
-            "parsing_mode": "flexible"
+            "custom_prompt": "Find all vehicles and people in this video...",
+            "output_keys": ["vehicles", "people"]
         })
     """
     
@@ -273,56 +227,9 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         # Optional custom prompt to override operation default
         self.custom_prompt = self.parse_string(d, "custom_prompt", default=None)
         
-        # Custom mode configuration
-        # Whether video metadata is required (only used for operation="custom")
-        self.require_metadata = self.parse_bool(d, "require_metadata", default=None)
-        # Parsing strictness: "strict" (fail on parse errors), "flexible" (degrade to strings), "permissive" (skip with warning)
-        # Default: "strict" for preset operations, "flexible" for custom
-        default_parsing_mode = "flexible" if self.operation == "custom" else "strict"
-        self.parsing_mode = self.parse_string(d, "parsing_mode", default=default_parsing_mode)
-        
         # Output parsing configuration
         # If None, parses all JSON keys; if list, only parses specified keys
         self.output_keys = self.parse_array(d, "output_keys", default=None)
-        
-        # Validate configuration
-        self._validate_config()
-    
-    def _validate_config(self):
-        """Validate configuration parameters for consistency.
-        
-        Enforces rules for custom mode:
-        - Must provide custom_prompt
-        - Must explicitly declare require_metadata
-        - Validates parsing_mode values
-        """
-        # Validate operation exists
-        if self.operation not in OPERATIONS:
-            raise ValueError(
-                f"Invalid operation: '{self.operation}'. "
-                f"Must be one of: {list(OPERATIONS.keys())}"
-            )
-        
-        # Custom mode validation
-        if self.operation == "custom":
-            if not self.custom_prompt:
-                raise ValueError(
-                    "operation='custom' requires 'custom_prompt' to be set. "
-                    "Custom mode gives you full control over the prompt and parsing behavior."
-                )
-            if self.require_metadata is None:
-                raise ValueError(
-                    "operation='custom' requires explicit 'require_metadata' declaration (True/False). "
-                    "Set to True if your prompt expects temporal data or bounding boxes with timestamps."
-                )
-        
-        # Validate parsing_mode
-        valid_parsing_modes = ["strict", "flexible", "permissive"]
-        if self.parsing_mode not in valid_parsing_modes:
-            raise ValueError(
-                f"Invalid parsing_mode: '{self.parsing_mode}'. "
-                f"Must be one of: {valid_parsing_modes}"
-            )
 
 
 class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
@@ -332,16 +239,8 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
     and can output multiple label types in a single forward pass. It inherits from
     both SamplesMixin (for per-sample field access) and Model (base FiftyOne interface).
     
-    Operation Modes:
-        - Preset operations: Validated, predictable behavior with automatic metadata requirements
-          (comprehensive, description, temporal_localization, tracking, ocr)
-        - Custom mode: Advanced usage with full control over prompts and parsing behavior
-          Requires explicit configuration: custom_prompt, require_metadata
-    
-    Parsing Modes:
-        - strict (default for presets): Fail fast on any parsing error
-        - flexible (default for custom): Log warnings and degrade gracefully
-        - permissive: Skip failed items silently
+    The model supports flexible operations through the OPERATIONS dict and can parse
+    custom JSON outputs with automatic type detection.
     
     Sample-level labels (stored in sample fields):
         - summary: Video description (plain text string)
@@ -354,9 +253,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         - objects: Object bounding boxes per frame (fo.Detections)
         - text_content: Text bounding boxes per frame (fo.Detections)
         - Any custom keys with time-based detections
-    
-    Note: Temporal and spatial parsing requires video metadata. Call dataset.compute_metadata()
-    before applying the model for operations that use timestamps or bounding boxes.
     """
     
     def __init__(self, config):
@@ -568,37 +464,16 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         video_path = sample.filepath
         logger.info(f"Processing video: {video_path}")
         
-        # Mode-aware metadata validation
-        if self.config.operation == "custom":
-            # Custom mode: use explicit require_metadata flag
-            if self.config.require_metadata:
-                if not hasattr(sample, 'metadata') or not sample.metadata:
-                    raise ValueError(
-                        "Custom mode with require_metadata=True needs sample metadata. "
-                        "Call dataset.compute_metadata() before applying model."
-                    )
-                if not getattr(sample.metadata, 'frame_rate', None):
-                    raise ValueError(
-                        "Sample metadata missing 'frame_rate'. "
-                        "Ensure dataset.compute_metadata() completed successfully."
-                    )
-                logger.info("Custom mode: metadata validated")
-            else:
-                logger.info("Custom mode: metadata not required (require_metadata=False)")
-        else:
-            # Preset operations: use METADATA_REQUIRED_OPERATIONS
-            if self.config.operation in METADATA_REQUIRED_OPERATIONS:
-                if not hasattr(sample, 'metadata') or not sample.metadata:
-                    raise ValueError(
-                        f"Operation '{self.config.operation}' requires sample metadata for timestamp conversion. "
-                        f"Call dataset.compute_metadata() before applying model."
-                    )
-                if not getattr(sample.metadata, 'frame_rate', None):
-                    raise ValueError(
-                        f"Sample metadata missing 'frame_rate'. "
-                        f"Ensure dataset.compute_metadata() completed successfully."
-                    )
-                logger.info(f"Operation '{self.config.operation}': metadata validated")
+        # Validate metadata upfront for operations that need it
+        needs_metadata = self.config.operation in [
+            "comprehensive", "temporal_localization", "tracking", "ocr"
+        ]
+        
+        if needs_metadata and not hasattr(sample, 'metadata'):
+            raise ValueError(
+                f"Operation '{self.config.operation}' requires sample metadata for timestamp conversion. "
+                f"Call dataset.compute_metadata() before applying model."
+            )
         
         # Determine prompt to use (priority: sample field > custom > operation default)
         prompt = self.prompt  # Start with property (custom or operation default)
@@ -930,13 +805,9 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             elif self.config.operation == "ocr":
                 parsed_json = {"text_content": parsed_json}
             else:
-                # Unknown list type for custom/other operations
-                # Return as raw text since we can't determine structure
-                logger.warning(
-                    f"Received list JSON for operation '{self.config.operation}'. "
-                    f"Expected dict format. Returning raw output as string."
-                )
-                return {"raw_output": str(parsed_json)}
+                # Unknown list type - skip parsing
+                logger.warning(f"Received list JSON but don't know how to parse for operation '{self.config.operation}'")
+                return {}
         
         # Determine which keys to parse (all or selective)
         keys = self.config.output_keys or list(parsed_json.keys())
@@ -961,28 +832,9 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 else:
                     # Skip complex dicts that don't fit the scene_info pattern
                     logger.debug(f"Skipping complex dict for key '{key}'")
-            elif isinstance(value, list):
+            elif isinstance(value, list) and value:
                 # List values - detect structure and parse appropriately
-                if value:  # Non-empty list
-                    self._parse_list_value(key, value, labels, video_path, sample)
-                else:  # Empty list - store empty TemporalDetections for type inference
-                    # When list is empty, FiftyOne needs type info for schema creation
-                    # Default to TemporalDetections for custom mode with temporal data
-                    if self.config.require_metadata:
-                        logger.debug(f"Empty list for key '{key}' - storing as empty TemporalDetections")
-                        labels[key] = fol.TemporalDetections(detections=[])
-                    else:
-                        # No metadata means likely not temporal data - skip empty lists
-                        logger.debug(f"Skipping empty list for key '{key}' (no metadata required)")
-                        # Don't add to labels dict - field won't be created
-        
-        # Safety check: never return completely empty dict (causes StopIteration in FiftyOne)
-        if not labels:
-            logger.warning(
-                f"Parsing produced no labels. Returning raw output as string. "
-                f"Check that output_keys match model output keys."
-            )
-            return {"raw_output": output_text}
+                self._parse_list_value(key, value, labels, video_path, sample)
         
         return labels
     
@@ -1013,11 +865,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Converts object appearance/disappearance times into temporal detections.
         Each object becomes a temporal detection spanning from first to last appearance.
         
-        Graceful degradation based on parsing_mode:
-        - strict: Raise exception on any parsing failure
-        - flexible: Return None and log warning on metadata/parsing errors
-        - permissive: Skip failed items silently and continue
-        
         Expected JSON structure:
             [
                 {"name": "car", "first_appears": "00:05.00", "last_appears": "00:15.50"},
@@ -1035,27 +882,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         if not objects_list:
             return None
         
-        # Check for metadata upfront for better error handling
-        has_metadata = (
-            hasattr(sample, 'metadata') and 
-            sample.metadata and 
-            getattr(sample.metadata, 'frame_rate', None)
-        )
-        
-        if not has_metadata:
-            error_msg = "Cannot parse object appearances: sample metadata missing or incomplete"
-            if self.config.parsing_mode == "strict":
-                raise ValueError(f"{error_msg}. Call dataset.compute_metadata() first.")
-            elif self.config.parsing_mode == "flexible":
-                logger.warning(f"{error_msg}. Skipping object appearance parsing.")
-                return None
-            else:  # permissive
-                logger.debug(f"{error_msg}. Skipping object appearance parsing.")
-                return None
-        
         detections = []
-        failed_count = 0
-        
         for obj in objects_list:
             # Convert timestamps to seconds
             first_sec = self._timestamp_to_seconds(obj.get("first_appears", "00:00.00"))
@@ -1073,26 +900,17 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 )
                 detections.append(detection)
             except Exception as e:
-                failed_count += 1
-                if self.config.parsing_mode == "strict":
-                    raise ValueError(f"Failed to create object appearance detection for '{object_name}': {e}")
-                elif self.config.parsing_mode == "flexible":
-                    logger.warning(f"Failed to create object appearance detection for '{object_name}': {e}")
-                else:  # permissive
-                    logger.debug(f"Skipping object appearance detection for '{object_name}': {e}")
+                logger.warning(f"Failed to create object appearance detection: {e}")
                 continue
         
         # Alert if complete failure
         if not detections and objects_list:
-            msg = f"Failed to parse ALL {len(objects_list)} object appearances"
-            if self.config.parsing_mode == "strict":
-                raise ValueError(f"{msg}. Check video metadata and timestamp format.")
-            else:
-                logger.warning(msg)
+            logger.error(
+                f"Failed to parse ALL {len(objects_list)} object appearances. "
+                f"Check video metadata and timestamp format."
+            )
         
         if detections:
-            if failed_count > 0:
-                logger.info(f"Successfully parsed {len(detections)}/{len(objects_list)} object appearances")
             return fol.TemporalDetections(detections=detections)
         return None
     
@@ -1101,11 +919,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Converts text visibility periods into temporal detections.
         Each text instance becomes a temporal detection for when it's visible.
-        
-        Graceful degradation based on parsing_mode:
-        - strict: Raise exception on any parsing failure
-        - flexible: Return None and log warning on metadata/parsing errors
-        - permissive: Skip failed items silently and continue
         
         Expected JSON structure:
             [
@@ -1124,27 +937,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         if not text_list:
             return None
         
-        # Check for metadata upfront for better error handling
-        has_metadata = (
-            hasattr(sample, 'metadata') and 
-            sample.metadata and 
-            getattr(sample.metadata, 'frame_rate', None)
-        )
-        
-        if not has_metadata:
-            error_msg = "Cannot parse text temporal data: sample metadata missing or incomplete"
-            if self.config.parsing_mode == "strict":
-                raise ValueError(f"{error_msg}. Call dataset.compute_metadata() first.")
-            elif self.config.parsing_mode == "flexible":
-                logger.warning(f"{error_msg}. Skipping text temporal parsing.")
-                return None
-            else:  # permissive
-                logger.debug(f"{error_msg}. Skipping text temporal parsing.")
-                return None
-        
         detections = []
-        failed_count = 0
-        
         for text_item in text_list:
             # Convert timestamps to seconds
             start_sec = self._timestamp_to_seconds(text_item.get("start", "00:00.00"))
@@ -1162,26 +955,17 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 )
                 detections.append(detection)
             except Exception as e:
-                failed_count += 1
-                if self.config.parsing_mode == "strict":
-                    raise ValueError(f"Failed to create text temporal detection for '{text_label}': {e}")
-                elif self.config.parsing_mode == "flexible":
-                    logger.warning(f"Failed to create text temporal detection for '{text_label}': {e}")
-                else:  # permissive
-                    logger.debug(f"Skipping text temporal detection for '{text_label}': {e}")
+                logger.warning(f"Failed to create text temporal detection: {e}")
                 continue
         
         # Alert if complete failure
         if not detections and text_list:
-            msg = f"Failed to parse ALL {len(text_list)} text temporal detections"
-            if self.config.parsing_mode == "strict":
-                raise ValueError(f"{msg}. Check video metadata and timestamp format.")
-            else:
-                logger.warning(msg)
+            logger.error(
+                f"Failed to parse ALL {len(text_list)} text temporal detections. "
+                f"Check video metadata and timestamp format."
+            )
         
         if detections:
-            if failed_count > 0:
-                logger.info(f"Successfully parsed {len(detections)}/{len(text_list)} text temporal detections")
             return fol.TemporalDetections(detections=detections)
         return None
     
@@ -1191,11 +975,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Converts model's timestamp-based events into FiftyOne's frame-based
         TemporalDetections. Uses TemporalDetection.from_timestamps() which
         automatically converts seconds to frame numbers using video metadata.
-        
-        Graceful degradation based on parsing_mode:
-        - strict: Raise exception on any parsing failure
-        - flexible: Return None and log warning on metadata/parsing errors
-        - permissive: Skip failed items silently and continue
         
         Expected JSON structure:
             [
@@ -1209,32 +988,12 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             sample (fo.Sample): FiftyOne sample (must have metadata for timestamp conversion)
             
         Returns:
-            fo.TemporalDetections or None: Container with all temporal detections, or None if empty/failed
+            fo.TemporalDetections or None: Container with all temporal detections, or None if empty
         """
         if not events_list:
             return None
         
-        # Check for metadata upfront for better error handling
-        has_metadata = (
-            hasattr(sample, 'metadata') and 
-            sample.metadata and 
-            getattr(sample.metadata, 'frame_rate', None)
-        )
-        
-        if not has_metadata:
-            error_msg = "Cannot parse temporal events: sample metadata missing or incomplete"
-            if self.config.parsing_mode == "strict":
-                raise ValueError(f"{error_msg}. Call dataset.compute_metadata() first.")
-            elif self.config.parsing_mode == "flexible":
-                logger.warning(f"{error_msg}. Skipping temporal event parsing.")
-                return None
-            else:  # permissive
-                logger.debug(f"{error_msg}. Skipping temporal event parsing.")
-                return None
-        
         detections = []
-        failed_count = 0
-        
         for event in events_list:
             # Convert "mm:ss.ff" timestamps to seconds
             start_sec = self._timestamp_to_seconds(event.get("start", "00:00.00"))
@@ -1253,27 +1012,18 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 )
                 detections.append(detection)
             except Exception as e:
-                failed_count += 1
-                if self.config.parsing_mode == "strict":
-                    raise ValueError(f"Failed to create temporal detection for event '{event_label}': {e}")
-                elif self.config.parsing_mode == "flexible":
-                    logger.warning(f"Failed to create temporal detection for event '{event_label}': {e}")
-                else:  # permissive
-                    logger.debug(f"Skipping temporal detection for event '{event_label}': {e}")
+                logger.warning(f"Failed to create temporal detection: {e}")
                 continue
-        
+            
         # Alert if complete failure
         if not detections and events_list:
-            msg = f"Failed to parse ALL {len(events_list)} temporal events"
-            if self.config.parsing_mode == "strict":
-                raise ValueError(f"{msg}. Check video metadata and timestamp format.")
-            else:
-                logger.warning(msg)
+            logger.error(
+                f"Failed to parse ALL {len(events_list)} temporal events. "
+                f"Check video metadata and timestamp format."
+            )
         
         # Return container with all detections, or None if none were created
         if detections:
-            if failed_count > 0:
-                logger.info(f"Successfully parsed {len(detections)}/{len(events_list)} temporal events")
             return fol.TemporalDetections(detections=detections)
         return None
     
