@@ -566,25 +566,24 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             sample: FiftyOne sample
             
         Returns:
-            dict: {"events": fo.TemporalDetections}
+            dict: {"events": fo.TemporalDetections} (empty if no detections)
         """
-        if not json_data:
-            return {}
-        
         # Handle both list and dict with "events" key
         if isinstance(json_data, list):
-            items = json_data
+            items = json_data if json_data else []
         elif isinstance(json_data, dict) and "events" in json_data:
-            items = json_data["events"]
+            items = json_data["events"] if json_data["events"] else []
         else:
-            logger.warning("Expected list or dict with 'events' key for temporal_localization")
-            return {}
+            if json_data:
+                logger.warning("Expected list or dict with 'events' key for temporal_localization")
+            items = []
         
         if not items:
-            return {}
+            # Return empty TemporalDetections container
+            return {"events": fol.TemporalDetections(detections=[])}
         
         detections = self._parse_temporal_detections(items, sample, "events")
-        return {"events": detections} if detections else {}
+        return {"events": detections if detections else fol.TemporalDetections(detections=[])}
     
     def _parse_tracking_only(self, json_data, sample):
         """Parse output as object tracking detections only.
@@ -599,22 +598,24 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Returns:
             dict: Frame-level labels {frame_num: {"objects": fo.Detections}}
         """
-        if not json_data:
-            return {}
-        
         # Handle both list and dict with "objects" key
         if isinstance(json_data, list):
-            items = json_data
+            items = json_data if json_data else []
         elif isinstance(json_data, dict) and "objects" in json_data:
-            items = json_data["objects"]
+            items = json_data["objects"] if json_data["objects"] else []
         else:
-            logger.warning("Expected list or dict with 'objects' key for tracking")
-            return {}
+            if json_data:
+                logger.warning("Expected list or dict with 'objects' key for tracking")
+            items = []
         
         if not items:
+            # No detections - return empty frame-level dict (FiftyOne handles this gracefully)
             return {}
         
         frame_detections = self._parse_frame_detections(items, sample, text_key=None)
+        
+        if not frame_detections:
+            return {}
         
         # Convert to final format
         labels = {}
@@ -636,22 +637,24 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Returns:
             dict: Frame-level labels {frame_num: {"text_content": fo.Detections}}
         """
-        if not json_data:
-            return {}
-        
         # Handle both list and dict with "text_content" key
         if isinstance(json_data, list):
-            items = json_data
+            items = json_data if json_data else []
         elif isinstance(json_data, dict) and "text_content" in json_data:
-            items = json_data["text_content"]
+            items = json_data["text_content"] if json_data["text_content"] else []
         else:
-            logger.warning("Expected list or dict with 'text_content' key for ocr")
-            return {}
+            if json_data:
+                logger.warning("Expected list or dict with 'text_content' key for ocr")
+            items = []
         
         if not items:
+            # No detections - return empty frame-level dict (FiftyOne handles this gracefully)
             return {}
         
         frame_detections = self._parse_frame_detections(items, sample, text_key="text")
+        
+        if not frame_detections:
+            return {}
         
         # Convert to final format
         labels = {}
@@ -671,9 +674,10 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             sample: FiftyOne sample
             
         Returns:
-            dict: Mixed sample-level and frame-level labels
+            dict: Mixed sample-level and frame-level labels (may be empty)
         """
         if not json_data:
+            # Return empty dict - FiftyOne will handle gracefully
             return {}
         
         if isinstance(json_data, list):
