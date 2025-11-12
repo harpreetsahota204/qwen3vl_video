@@ -1,18 +1,26 @@
 """
 FiftyOne integration for Qwen3-VL video understanding model.
 
-This module provides a config-based implementation of the Qwen3-VL model
-for video understanding tasks in FiftyOne, supporting:
-- Video description and summarization
-- Temporal event localization
-- Object tracking with bounding boxes
-- Video OCR and text extraction
-- Spatial understanding
-- Comprehensive video analysis
+This module provides an operation-driven implementation of the Qwen3-VL model
+for video understanding tasks in FiftyOne. Each operation has a fixed prompt
+and predictable parsing strategy:
 
-The model can output multiple label types in a single forward pass:
-- Sample-level: Classifications, TemporalDetections
+Operations:
+- description: Plain text video description
+- temporal_localization: Temporal event detection
+- tracking: Frame-level object tracking with bounding boxes
+- ocr: Frame-level text extraction with bounding boxes
+- comprehensive: Flexible multi-label analysis
+- custom: User-defined prompts with plain text output
+
+Output Types:
+- Sample-level: Classifications, TemporalDetections, plain text
 - Frame-level: Detections (objects, OCR text)
+
+Key Design Principles:
+- Operation determines both prompt and parsing behavior
+- Prompts are immutable per operation (except custom)
+- Predictable outputs for each operation type
 
 """
 
@@ -93,6 +101,9 @@ Output in JSON: [{"time": "mm:ss.ff", "bbox_2d": [...], "label": "..."}, ...]"""
 - bbox_2d: bounding box as [x_min, y_min, x_max, y_max] in 0-1000 scale
 Output in JSON: [{"time": "mm:ss.ff", "text": "...", "bbox_2d": [...]}, ...]"""
     },
+    "custom": {
+        "prompt": None  # User must provide via custom_prompt
+    },
 }
 
 
@@ -110,9 +121,13 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         sample_fps: Frame sampling rate (default: 10)
         max_new_tokens: Max tokens to generate (default: 8192)
         operation: Operation type - "comprehensive", "description", "temporal_localization", 
-                  "tracking", or "ocr" (default: "comprehensive")
-        custom_prompt: Custom prompt to override operation default
-        output_keys: List of JSON keys to parse (None = parse all)
+                  "tracking", "ocr", or "custom" (default: "comprehensive")
+        custom_prompt: Required for operation="custom", forbidden otherwise
+    
+    Operation Constraints:
+        - Each operation has a fixed prompt and parsing strategy
+        - custom_prompt is ONLY allowed when operation="custom"
+        - For operation="custom", custom_prompt is REQUIRED
     """
     
     def __init__(self, d):
@@ -139,25 +154,34 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         # Operation configuration
         self.operation = self.parse_string(d, "operation", default="comprehensive")
         self.custom_prompt = self.parse_string(d, "custom_prompt", default=None)
-        self.output_keys = self.parse_array(d, "output_keys", default=None)
+        
+        # Validate operation and custom_prompt relationship
+        if self.operation != "custom" and self.custom_prompt is not None:
+            raise ValueError("custom_prompt only allowed when operation='custom'")
+        
+        if self.operation == "custom" and self.custom_prompt is None:
+            raise ValueError("custom_prompt required when operation='custom'")
 
 
 class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
     """FiftyOne wrapper for Qwen3-VL video understanding model.
     
-    This model processes videos directly from file paths and can output multiple 
-    label types in a single forward pass. It inherits from both SamplesMixin 
-    (for per-sample field access) and Model (base FiftyOne interface).
+    This model processes videos directly from file paths using operation-driven
+    parsing. Each operation has a fixed prompt and predictable output structure.
+    It inherits from both SamplesMixin (for per-sample field access) and Model 
+    (base FiftyOne interface).
     
-    Sample-level labels (stored in sample fields):
-        - summary: Video description (plain text)
-        - events: Temporal detections for events (fo.TemporalDetections)
-        - objects: Object appearances over time (fo.TemporalDetections)
-        - scene_info_*: Scene classifications (fo.Classification)
+    Operations and Outputs:
+        - description: Plain text summary in "summary" field
+        - temporal_localization: fo.TemporalDetections in "events" field
+        - tracking: fo.Detections per frame in frame.objects
+        - ocr: fo.Detections per frame in frame.text_content
+        - comprehensive: Mixed labels with flexible schema parsing
+        - custom: Plain text summary with user-defined prompt
     
-    Frame-level labels (stored in sample.frames[N] fields):
-        - objects: Object bounding boxes per frame (fo.Detections)
-        - text_content: Text bounding boxes per frame (fo.Detections)
+    For comprehensive operation, possible labels include:
+        Sample-level: summary, events, objects, scene_info_*, activities_*
+        Frame-level: objects, text_content (stored in sample.frames[N])
     """
     
     def __init__(self, config):
@@ -188,9 +212,122 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         """Set the fields this model needs from samples."""
         self._fields = fields
 
+    # Video processing parameters
+    @property
+    def total_pixels(self):
+        """Max pixels for quality/memory tradeoff."""
+        return self.config.total_pixels
+    
+    @total_pixels.setter
+    def total_pixels(self, value):
+        """Set max pixels."""
+        self.config.total_pixels = value
+    
+    @property
+    def min_pixels(self):
+        """Min pixels threshold."""
+        return self.config.min_pixels
+    
+    @min_pixels.setter
+    def min_pixels(self, value):
+        """Set min pixels."""
+        self.config.min_pixels = value
+    
+    @property
+    def max_frames(self):
+        """Max frames to sample from video."""
+        return self.config.max_frames
+    
+    @max_frames.setter
+    def max_frames(self, value):
+        """Set max frames."""
+        self.config.max_frames = value
+    
+    @property
+    def sample_fps(self):
+        """Frame sampling rate."""
+        return self.config.sample_fps
+    
+    @sample_fps.setter
+    def sample_fps(self, value):
+        """Set frame sampling rate."""
+        self.config.sample_fps = value
+    
+    @property
+    def image_patch_size(self):
+        """Image patch size for vision processing."""
+        return self.config.image_patch_size
+    
+    @image_patch_size.setter
+    def image_patch_size(self, value):
+        """Set image patch size."""
+        self.config.image_patch_size = value
+    
+    # Text generation parameters
+    @property
+    def max_new_tokens(self):
+        """Max tokens to generate."""
+        return self.config.max_new_tokens
+    
+    @max_new_tokens.setter
+    def max_new_tokens(self, value):
+        """Set max new tokens."""
+        self.config.max_new_tokens = value
+    
+    @property
+    def do_sample(self):
+        """Whether to use sampling (vs greedy decoding)."""
+        return self.config.do_sample
+    
+    @do_sample.setter
+    def do_sample(self, value):
+        """Set sampling strategy."""
+        self.config.do_sample = value
+    
+    @property
+    def temperature(self):
+        """Sampling temperature (higher = more random)."""
+        return self.config.temperature
+    
+    @temperature.setter
+    def temperature(self, value):
+        """Set temperature."""
+        self.config.temperature = value
+    
+    @property
+    def top_p(self):
+        """Nucleus sampling threshold."""
+        return self.config.top_p
+    
+    @top_p.setter
+    def top_p(self, value):
+        """Set top_p."""
+        self.config.top_p = value
+    
+    @property
+    def top_k(self):
+        """Top-k sampling parameter."""
+        return self.config.top_k
+    
+    @top_k.setter
+    def top_k(self, value):
+        """Set top_k."""
+        self.config.top_k = value
+    
+    @property
+    def repetition_penalty(self):
+        """Repetition penalty (higher = less repetition)."""
+        return self.config.repetition_penalty
+    
+    @repetition_penalty.setter
+    def repetition_penalty(self, value):
+        """Set repetition penalty."""
+        self.config.repetition_penalty = value
+    
+    # Operation configuration
     @property
     def operation(self):
-        """Current operation type (determines default prompt)."""
+        """Current operation type (determines prompt and parsing)."""
         return self.config.operation
     
     @operation.setter
@@ -202,12 +339,20 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
     
     @property
     def prompt(self):
-        """Get current prompt - custom or default for operation."""
-        return self.config.custom_prompt or OPERATIONS[self.config.operation]["prompt"]
+        """Get current prompt for the operation.
+        
+        For custom operation, returns the user-provided custom_prompt.
+        For all other operations, returns the predefined prompt.
+        """
+        if self.config.operation == "custom":
+            return self.config.custom_prompt  # Guaranteed to exist by validation
+        return OPERATIONS[self.config.operation]["prompt"]
     
     @prompt.setter
     def prompt(self, value):
-        """Set custom prompt, overriding operation default."""
+        """Set custom prompt (only valid for custom operation)."""
+        if self.config.operation != "custom":
+            raise ValueError("Cannot set prompt for predefined operations. Use operation='custom'")
         self.config.custom_prompt = value
     
     def _load_model(self):
@@ -242,10 +387,10 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         This is the main prediction method called by FiftyOne's apply_model().
         
-        Prompt Priority (in order):
-        1. Sample field value (if needs_fields is configured)
-        2. Custom prompt (if config.custom_prompt is set)
-        3. Default prompt for operation (from OPERATIONS dict)
+        Prompt Priority:
+        - For predefined operations: Uses fixed operation prompt (immutable)
+        - For custom operation: Uses config.custom_prompt, or can be overridden
+          per-sample via needs_fields
         
         Args:
             arg: Unused (for compatibility with Model interface)
@@ -273,14 +418,15 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             )
         
         # Determine prompt to use
-        prompt = self.prompt  # Start with property (custom or operation default)
+        prompt = self.prompt  # Get operation prompt
         
-        # Override with sample field value if configured via needs_fields
-        prompt_field = self._fields.get("prompt_field") or next(iter(self._fields.values()), None)
-        if prompt_field:
-            field_value = sample.get_field(prompt_field)
-            if field_value:
-                prompt = str(field_value)
+        # For custom operation only, allow per-sample prompt override via needs_fields
+        if self.config.operation == "custom":
+            prompt_field = self._fields.get("prompt_field") or next(iter(self._fields.values()), None)
+            if prompt_field:
+                field_value = sample.get_field(prompt_field)
+                if field_value:
+                    prompt = str(field_value)
         
         # Build messages in Qwen3-VL format
         # Video is passed as file path, model handles frame extraction internally
@@ -409,55 +555,135 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         except json.JSONDecodeError:
             return None
     
-    def _parse_output(self, output_text, sample):
-        """Parse model output into FiftyOne labels.
+    def _parse_temporal_only(self, json_data, sample):
+        """Parse output as temporal detections only.
         
-        Flexibly parses JSON output with automatic type detection based on structure.
-        Supports both predefined operations and custom prompts with arbitrary JSON keys.
-        
-        Parsing Strategy:
-        1. Extract JSON from output (handles markdown code blocks and raw lists)
-        2. If JSON is a list, wrap in dict with operation-specific key
-        3. Determine which keys to parse (all or config.output_keys subset)
-        4. For each key, detect type based on value structure
+        Used for temporal_localization operation. Expects a list of events
+        with start/end timestamps and descriptions.
         
         Args:
-            output_text: Raw text output from model
-            sample: FiftyOne sample for metadata
-        
+            json_data: Parsed JSON (list or dict)
+            sample: FiftyOne sample
+            
         Returns:
-            dict: Mixed sample-level (string keys) and frame-level (int keys) labels
+            dict: {"events": fo.TemporalDetections}
         """
-        parsed_json = self._extract_json(output_text)
+        if not json_data:
+            return {}
         
-        # Fallback if no JSON found - treat entire output as plain text summary
-        if not parsed_json:
-            return {"summary": output_text}
+        # Handle both list and dict with "events" key
+        if isinstance(json_data, list):
+            items = json_data
+        elif isinstance(json_data, dict) and "events" in json_data:
+            items = json_data["events"]
+        else:
+            logger.warning("Expected list or dict with 'events' key for temporal_localization")
+            return {}
         
-        # Handle list-type JSON (wrap in dict with operation-appropriate key)
-        if isinstance(parsed_json, list):
-            key_map = {
-                "temporal_localization": "events",
-                "tracking": "objects",
-                "ocr": "text_content"
-            }
-            key = key_map.get(self.config.operation)
-            if not key:
-                logger.warning(f"Don't know how to parse list for operation '{self.config.operation}'")
-                return {}
-            parsed_json = {key: parsed_json}
+        if not items:
+            return {}
+        
+        detections = self._parse_temporal_detections(items, sample, "events")
+        return {"events": detections} if detections else {}
+    
+    def _parse_tracking_only(self, json_data, sample):
+        """Parse output as object tracking detections only.
+        
+        Used for tracking operation. Expects a list of frame-level detections
+        with time, bbox_2d, and label.
+        
+        Args:
+            json_data: Parsed JSON (list or dict)
+            sample: FiftyOne sample
+            
+        Returns:
+            dict: Frame-level labels {frame_num: {"objects": fo.Detections}}
+        """
+        if not json_data:
+            return {}
+        
+        # Handle both list and dict with "objects" key
+        if isinstance(json_data, list):
+            items = json_data
+        elif isinstance(json_data, dict) and "objects" in json_data:
+            items = json_data["objects"]
+        else:
+            logger.warning("Expected list or dict with 'objects' key for tracking")
+            return {}
+        
+        if not items:
+            return {}
+        
+        frame_detections = self._parse_frame_detections(items, sample, text_key=None)
+        
+        # Convert to final format
+        labels = {}
+        for frame_num, dets in frame_detections.items():
+            labels[frame_num] = {"objects": dets}
+        
+        return labels
+    
+    def _parse_ocr_only(self, json_data, sample):
+        """Parse output as OCR detections only.
+        
+        Used for ocr operation. Expects a list of frame-level detections
+        with time, text, and bbox_2d.
+        
+        Args:
+            json_data: Parsed JSON (list or dict)
+            sample: FiftyOne sample
+            
+        Returns:
+            dict: Frame-level labels {frame_num: {"text_content": fo.Detections}}
+        """
+        if not json_data:
+            return {}
+        
+        # Handle both list and dict with "text_content" key
+        if isinstance(json_data, list):
+            items = json_data
+        elif isinstance(json_data, dict) and "text_content" in json_data:
+            items = json_data["text_content"]
+        else:
+            logger.warning("Expected list or dict with 'text_content' key for ocr")
+            return {}
+        
+        if not items:
+            return {}
+        
+        frame_detections = self._parse_frame_detections(items, sample, text_key="text")
+        
+        # Convert to final format
+        labels = {}
+        for frame_num, dets in frame_detections.items():
+            labels[frame_num] = {"text_content": dets}
+        
+        return labels
+    
+    def _parse_comprehensive(self, json_data, sample):
+        """Parse output with flexible schema-based parsing.
+        
+        Used for comprehensive operation. Automatically detects structure
+        and parses all JSON keys based on their value types.
+        
+        Args:
+            json_data: Parsed JSON (dict)
+            sample: FiftyOne sample
+            
+        Returns:
+            dict: Mixed sample-level and frame-level labels
+        """
+        if not json_data:
+            return {}
+        
+        if isinstance(json_data, list):
+            logger.warning("Expected dict for comprehensive operation, got list")
+            return {}
         
         labels = {}
         
-        # Determine which keys to parse (all or selective)
-        keys = self.config.output_keys or list(parsed_json.keys())
-        
         # Parse each key based on its value structure
-        for key in keys:
-            if key not in parsed_json:
-                continue
-            
-            value = parsed_json[key]
+        for key, value in json_data.items():
             
             # Dispatch based on value type
             if isinstance(value, str):
@@ -471,6 +697,47 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 self._parse_list_value(key, value, labels, sample)
         
         return labels
+    
+    def _parse_output(self, output_text, sample):
+        """Parse model output into FiftyOne labels using operation-driven dispatch.
+        
+        Each operation has a specific parsing strategy:
+        - description/custom: Plain text output (no JSON parsing)
+        - temporal_localization: Parse as temporal detections
+        - tracking: Parse as frame-level object detections
+        - ocr: Parse as frame-level text detections
+        - comprehensive: Flexible schema-based parsing
+        
+        Args:
+            output_text: Raw text output from model
+            sample: FiftyOne sample for metadata
+        
+        Returns:
+            dict: Mixed sample-level (string keys) and frame-level (int keys) labels
+        """
+        # Operations that return plain text (no JSON parsing)
+        if self.config.operation in ["description", "custom"]:
+            return {"summary": output_text}
+        
+        # Operations that require JSON parsing
+        json_data = self._extract_json(output_text)
+        
+        # Dispatch to operation-specific parser
+        if self.config.operation == "temporal_localization":
+            return self._parse_temporal_only(json_data, sample)
+        
+        elif self.config.operation == "tracking":
+            return self._parse_tracking_only(json_data, sample)
+        
+        elif self.config.operation == "ocr":
+            return self._parse_ocr_only(json_data, sample)
+        
+        elif self.config.operation == "comprehensive":
+            return self._parse_comprehensive(json_data, sample)
+        
+        else:
+            logger.warning(f"Unknown operation: {self.config.operation}")
+            return {"summary": output_text}
     
     def _is_simple_dict(self, value):
         """Check if dict has only simple string/number values.
