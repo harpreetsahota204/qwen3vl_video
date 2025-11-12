@@ -965,9 +965,16 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                 # List values - detect structure and parse appropriately
                 if value:  # Non-empty list
                     self._parse_list_value(key, value, labels, video_path, sample)
-                else:  # Empty list - store as None to indicate "no detections found"
-                    logger.debug(f"Empty list for key '{key}' - storing as None")
-                    labels[key] = None
+                else:  # Empty list - store empty TemporalDetections for type inference
+                    # When list is empty, FiftyOne needs type info for schema creation
+                    # Default to TemporalDetections for custom mode with temporal data
+                    if self.config.require_metadata:
+                        logger.debug(f"Empty list for key '{key}' - storing as empty TemporalDetections")
+                        labels[key] = fol.TemporalDetections(detections=[])
+                    else:
+                        # No metadata means likely not temporal data - skip empty lists
+                        logger.debug(f"Skipping empty list for key '{key}' (no metadata required)")
+                        # Don't add to labels dict - field won't be created
         
         # Safety check: never return completely empty dict (causes StopIteration in FiftyOne)
         if not labels:
