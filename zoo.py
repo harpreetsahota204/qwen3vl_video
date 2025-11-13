@@ -623,13 +623,14 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             items = []
         
         if not items:
-            # No detections - return empty frame-level dict (FiftyOne handles this gracefully)
-            return {}
+            # No detections - add classification indicating no objects found
+            return {"objects": fol.Detections(detections=[])}
         
         frame_detections = self._parse_frame_detections(items, sample, text_key=None)
         
         if not frame_detections:
-            return {}
+            # Parsing failed - add empty detections
+            return {"objects": fol.Detections(detections=[])}
         
         # Convert to final format
         labels = {}
@@ -662,13 +663,14 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             items = []
         
         if not items:
-            # No detections - return empty frame-level dict (FiftyOne handles this gracefully)
-            return {}
+            # No text found - add classification indicating no text detected
+            return {"text_content": fol.Detections(detections=[])}
         
         frame_detections = self._parse_frame_detections(items, sample, text_key="text")
         
         if not frame_detections:
-            return {}
+            # Parsing failed - add empty detections
+            return {"text_content": fol.Detections(detections=[])}
         
         # Convert to final format
         labels = {}
@@ -691,12 +693,12 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             dict: Mixed sample-level and frame-level labels (may be empty)
         """
         if not json_data:
-            # Return empty dict - FiftyOne will handle gracefully
-            return {}
+            # No data - return summary indicating no output
+            return {"summary": "No structured output from model"}
         
         if isinstance(json_data, list):
             logger.warning("Expected dict for comprehensive operation, got list")
-            return {}
+            return {"summary": "Invalid output format: received list instead of dict"}
         
         labels = {}
         
