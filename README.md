@@ -155,9 +155,20 @@ Custom operation returns raw text, which you can parse into FiftyOne labels:
 import fiftyone as fo
 import json
 import re
+from collections import defaultdict
 
 def parse_time_str(timestamp_str):
-    """Convert 'mm:ss.ff' timestamp to seconds."""
+    """Convert 'mm:ss.ff' timestamp to seconds.
+    
+    Parses timestamp format and converts to total seconds.
+    Format: "mm:ss.ff" where mm=minutes, ss=seconds, ff=centiseconds
+    
+    Args:
+        timestamp_str: Timestamp string in "mm:ss.ff" format
+        
+    Returns:
+        float: Time in seconds, or 0.0 if parsing fails
+    """
     match = re.match(r'(\d+):(\d+)\.(\d+)', str(timestamp_str))
     if not match:
         return 0.0
@@ -169,28 +180,30 @@ def parse_time_str(timestamp_str):
     return minutes * 60 + seconds + centiseconds / 100.0
 
 def parse_events_to_temporal_detections(events, label, sample):
-    """Convert event list to FiftyOne TemporalDetections."""
     detections = []
     for event in events:
         start_sec = parse_time_str(event["start"])
         end_sec = parse_time_str(event["end"])
+        
+        # Use description as the label if available, otherwise use category name
+        event_label = event.get("description", label)
+        
         detection = fo.TemporalDetection.from_timestamps(
             [start_sec, end_sec],
-            label=label,
+            label=event_label,
             sample=sample
         )
-        detection.set_attribute_value("description", event["description"])
         detections.append(detection)
     return fo.TemporalDetections(detections=detections)
 
 def clean_and_parse_json(text):
-    """Remove markdown code blocks and parse JSON."""
+    """Remove markdown code blocks and parse JSON"""
     text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
     return json.loads(text)
 
-# Process all samples
+# Iterate over all samples and process the 'custom_output_result' field
 for sample in dataset.iter_samples(autosave=True):
-    content_str = sample["custom_analysis_result"]
+    content_str = sample["custom_output_result"]
     events_dict = clean_and_parse_json(content_str)
     
     for category, events in events_dict.items():
