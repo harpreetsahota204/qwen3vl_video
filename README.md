@@ -501,7 +501,7 @@ See the source code in `zoo.py` for a complete reference implementation.
 
 - 🐛 **Issues**: [GitHub Issues](https://github.com/harpreetsahota204/qwen3vl_video/issues)
 - 📖 **FiftyOne Docs**: [docs.voxel51.com](https://docs.voxel51.com)
-- 💬 **FiftyOne Community**: [Slack](https://slack.voxel51.com)
+- 💬 **FiftyOne Community**: [Discord](https://community.voxel51.com/)
 - 🤖 **Qwen3-VL**: [HuggingFace](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
 
 ## Acknowledgments
