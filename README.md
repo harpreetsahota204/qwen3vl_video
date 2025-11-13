@@ -1,5 +1,7 @@
 # Qwen3-VL Video Model for FiftyOne
 
+![image](qwen3vl_video_fo.gif)
+
 A FiftyOne zoo model integration for Qwen3-VL that enables comprehensive video understanding with multiple label types in a single forward pass.
 
 ## Quick Start
@@ -144,6 +146,84 @@ dataset.apply_model(model, label_field="custom_analysis")
 - Specialized event detection
 - Custom JSON schemas you'll parse yourself
 - Experimenting with prompts
+
+#### Post-Processing Custom Output
+
+Custom operation returns raw text, which you can parse into FiftyOne labels:
+
+```python
+import fiftyone as fo
+import json
+import re
+
+def parse_time_str(timestamp_str):
+    """Convert 'mm:ss.ff' timestamp to seconds."""
+    match = re.match(r'(\d+):(\d+)\.(\d+)', str(timestamp_str))
+    if not match:
+        return 0.0
+    
+    minutes = int(match.group(1))
+    seconds = int(match.group(2))
+    centiseconds = int(match.group(3))
+    
+    return minutes * 60 + seconds + centiseconds / 100.0
+
+def parse_events_to_temporal_detections(events, label, sample):
+    """Convert event list to FiftyOne TemporalDetections."""
+    detections = []
+    for event in events:
+        start_sec = parse_time_str(event["start"])
+        end_sec = parse_time_str(event["end"])
+        detection = fo.TemporalDetection.from_timestamps(
+            [start_sec, end_sec],
+            label=label,
+            sample=sample
+        )
+        detection.set_attribute_value("description", event["description"])
+        detections.append(detection)
+    return fo.TemporalDetections(detections=detections)
+
+def clean_and_parse_json(text):
+    """Remove markdown code blocks and parse JSON."""
+    text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
+    return json.loads(text)
+
+# Process all samples
+for sample in dataset.iter_samples(autosave=True):
+    content_str = sample["custom_analysis_result"]
+    events_dict = clean_and_parse_json(content_str)
+    
+    for category, events in events_dict.items():
+        if events:
+            sample[category] = parse_events_to_temporal_detections(events, category, sample)
+```
+
+**Example: Parsing as Classifications**
+
+For categorical analysis like content rating or sentiment:
+
+```python
+model.operation = "custom"
+model.custom_prompt = """Analyze this video and provide:
+{
+  "content_type": "educational/entertainment/promotional/other",
+  "safety_rating": "safe/moderate/unsafe",
+  "primary_activity": "sports/cooking/gaming/vlog/other"
+}
+"""
+
+dataset.apply_model(model, label_field="analysis")
+
+# Parse into Classifications
+for sample in dataset.iter_samples(autosave=True):
+    content_str = sample["analysis_result"]
+    result = clean_and_parse_json(content_str)
+    
+    # Add as Classifications
+    sample["content_type"] = fo.Classification(label=result["content_type"])
+    sample["safety_rating"] = fo.Classification(label=result["safety_rating"])
+    sample["primary_activity"] = fo.Classification(label=result["primary_activity"])
+```
 
 ## Dynamic Reconfiguration
 
