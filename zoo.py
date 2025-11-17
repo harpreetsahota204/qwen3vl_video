@@ -209,8 +209,6 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         logger.info(f"Using device: {self.device}")
         self._last_computed_embeddings = None  # Cache for get_embeddings()
         
-        # Configuration
-        self.pooling_strategy = config.pooling_strategy
         # Lazy loading - model and processor loaded on first predict() call
         self._processor = None
         self._model = None
@@ -387,6 +385,24 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         if self.config.operation != "custom":
             raise ValueError("custom_prompt only allowed when operation='custom'")
         self.config.custom_prompt = value
+    
+    @property
+    def pooling_strategy(self):
+        """Get pooling strategy for embeddings."""
+        return self.config.pooling_strategy
+    
+    @pooling_strategy.setter
+    def pooling_strategy(self, value):
+        """Set pooling strategy for embeddings.
+        
+        Args:
+            value: Pooling strategy ("cls", "mean", or "max")
+        """
+        if value not in ["cls", "mean", "max"]:
+            raise ValueError(
+                f"pooling_strategy must be 'cls', 'mean', or 'max', got '{value}'"
+            )
+        self.config.pooling_strategy = value
     
     def _load_model(self):
         """Load Qwen3-VL model and processor from HuggingFace.
@@ -603,8 +619,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Args:
             video_paths: List of video file paths
-            prompt: Optional text prompt to condition the embeddings (str)
-                   If None, uses default prompt for all videos
+            prompt: Internal parameter (not used, kept for API compatibility)
             
         Returns:
             numpy array: 2D array of embeddings with shape (num_videos, hidden_dim)
@@ -633,7 +648,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Args:
             video: Video reader object (e.g., FFmpegVideoReader) or string path
-            prompt: Optional text prompt to condition the embedding (str)
+            prompt: Internal parameter (not used, kept for API compatibility)
             
         Returns:
             numpy array: 1D embedding vector with shape (hidden_dim,)
@@ -649,7 +664,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         Args:
             videos: List of video reader objects or string paths
-            prompt: Optional text prompt to condition the embeddings (str)
+            prompt: Internal parameter (not used, kept for API compatibility)
             
         Returns:
             numpy array: 2D embeddings with shape (num_videos, hidden_dim)
