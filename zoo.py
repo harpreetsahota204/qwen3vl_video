@@ -41,7 +41,7 @@ from transformers import AutoProcessor, AutoModelForVision2Seq
 from transformers.utils.import_utils import is_flash_attn_2_available
 
 from qwen_vl_utils import process_vision_info
-
+import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
@@ -131,6 +131,9 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
     """
     
     def __init__(self, d):
+        # Qwen3VL processor handles all preprocessing, so we use raw inputs
+        if "raw_inputs" not in d:
+            d["raw_inputs"] = True
         super().__init__(d)
         
         # Model parameters
@@ -161,6 +164,19 @@ class Qwen3VLVideoModelConfig(fout.TorchImageModelConfig):
         
         if self.operation == "custom" and self.custom_prompt is None:
             raise ValueError("custom_prompt required when operation='custom'")
+        
+        # Pooling strategy for creating fixed-dimension embeddings
+        self.pooling_strategy = self.parse_string(
+            d, "pooling_strategy", default="cls"
+        )
+        
+        # Validate pooling strategy
+        if self.pooling_strategy not in ["cls", "mean", "max"]:
+            raise ValueError(
+                f"pooling_strategy must be 'cls', 'mean', or 'max', "
+                f"got '{self.pooling_strategy}'"
+            )
+
 
 
 class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
@@ -191,7 +207,10 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         # Detect and set best available device
         self.device = get_device()
         logger.info(f"Using device: {self.device}")
+        self._last_computed_embeddings = None  # Cache for get_embeddings()
         
+        # Configuration
+        self.pooling_strategy = config.pooling_strategy
         # Lazy loading - model and processor loaded on first predict() call
         self._processor = None
         self._model = None
@@ -396,6 +415,276 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         
         logger.info("Model loaded successfully")
     
+    def _extract_video_path(self, video):
+        """Extract filepath from video reader object or string.
+        
+        Args:
+            video: Video reader object or string path
+            
+        Returns:
+            str: Video file path
+            
+        Raises:
+            TypeError: If video type is not supported
+        """
+        if isinstance(video, str):
+            return video
+        elif hasattr(video, 'inpath'):
+            return video.inpath
+        elif hasattr(video, 'path'):
+            return video.path
+        elif hasattr(video, 'filepath'):
+            return video.filepath
+        else:
+            raise TypeError(
+                f"Unsupported video type: {type(video)}. "
+                f"Expected string path or video reader with filepath attribute."
+            )
+    
+    def _build_video_message(self, video_path, prompt):
+        """Build message structure for Qwen3-VL inference.
+        
+        Args:
+            video_path: Path to video file
+            prompt: Text prompt for the model
+            
+        Returns:
+            list: Messages in Qwen3-VL format
+        """
+        return [{
+            "role": "user",
+            "content": [
+                {
+                    "video": video_path,
+                    "total_pixels": self.config.total_pixels,
+                    "min_pixels": self.config.min_pixels,
+                    "max_frames": self.config.max_frames,
+                    "sample_fps": self.config.sample_fps
+                },
+                {"type": "text", "text": prompt}
+            ]
+        }]
+    
+    def _prepare_processor_inputs(self, messages, device):
+        """Prepare processor inputs from messages.
+        
+        Common processing pipeline for both inference and embedding.
+        
+        Args:
+            messages: List of message dicts in Qwen3-VL format
+            device: Device to move tensors to
+            
+        Returns:
+            dict: Processed inputs ready for model
+        """
+        # Apply chat template
+        text = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        
+        # Process vision info
+        image_inputs, video_inputs, video_kwargs = process_vision_info(
+            [messages],
+            return_video_kwargs=True,
+            image_patch_size=self.config.image_patch_size,
+            return_video_metadata=True
+        )
+        
+        # Unpack video inputs and metadata
+        if video_inputs:
+            video_inputs, video_metadatas = zip(*video_inputs)
+            video_inputs, video_metadatas = list(video_inputs), list(video_metadatas)
+        else:
+            video_metadatas = None
+        
+        # Prepare final inputs
+        inputs = self._processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            video_metadata=video_metadatas,
+            **video_kwargs,
+            do_resize=False,
+            return_tensors="pt"
+        ).to(device)
+        
+        return inputs
+        
+    @property
+    def has_embeddings(self):
+        """Whether this instance can generate embeddings.
+        
+        Returns:
+            bool: Always True for this model as embedding generation is supported
+        """
+        return True
+
+    def _apply_pooling(self, hidden_states, strategy=None):
+        """Apply pooling strategy to hidden states.
+        
+        Converts variable-length hidden states to fixed-dimension embeddings.
+        
+        Args:
+            hidden_states: Tensor of shape (batch, seq_len, hidden_dim)
+            strategy: Pooling strategy to use (overrides default if provided)
+            
+        Returns:
+            torch.Tensor: Pooled embeddings of shape (batch, hidden_dim)
+        """
+        strategy = strategy or self.pooling_strategy
+        
+        if strategy == "cls":
+            # Use first token (CLS token)
+            pooled = hidden_states[:, 0, :]
+        elif strategy == "mean":
+            # Average pooling across sequence
+            pooled = hidden_states.mean(dim=1)
+        elif strategy == "max":
+            # Max pooling across sequence
+            pooled = hidden_states.max(dim=1)[0]
+        else:
+            raise ValueError(f"Unknown pooling strategy: {strategy}")
+        
+        # Normalize for cosine similarity
+        pooled = F.normalize(pooled, p=2, dim=1)
+        
+        return pooled
+
+    def embed_video(self, video_path, prompt=None):
+        """Embed a single video.
+        
+        Extracts a fixed-dimension embedding vector for a video file.
+        
+        Args:
+            video_path: Path to video file (str)
+            prompt: Optional text prompt to condition the embedding (str)
+                   If None, uses default: "Provide a description of what is happening in this video"
+            
+        Returns:
+            numpy array: 1D embedding vector with shape (hidden_dim,)
+        """
+        # Lazy load model on first use
+        if self._model is None:
+            self._load_model()
+        
+        # Use default prompt if none provided
+        if prompt is None:
+            prompt = "Provide a description of what is happening in this video"
+        
+        # Build messages with prompt
+        messages = self._build_video_message(video_path, prompt)
+        
+        # Prepare inputs (reuse common pipeline)
+        inputs = self._prepare_processor_inputs(messages, self.device)
+        
+        # Forward pass through encoder (no generation)
+        with torch.no_grad():
+            outputs = self._model.model(
+                input_ids=inputs['input_ids'],
+                pixel_values_videos=inputs.get('pixel_values_videos'),
+                video_grid_thw=inputs.get('video_grid_thw'),
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            
+            # Get hidden states from last layer
+            hidden_states = outputs.hidden_states[-1]  # (batch, seq_len, hidden_dim)
+            
+            # Apply pooling to get fixed-dimension embedding
+            embedding = self._apply_pooling(hidden_states)
+            
+            # Convert to float32 (numpy doesn't support bfloat16), then to numpy
+            return embedding.cpu().float().numpy()[0]
+
+    def embed_videos(self, video_paths, prompt=None):
+        """Embed multiple videos.
+        
+        Processes multiple videos sequentially to handle variable video lengths.
+        
+        Args:
+            video_paths: List of video file paths
+            prompt: Optional text prompt to condition the embeddings (str)
+                   If None, uses default prompt for all videos
+            
+        Returns:
+            numpy array: 2D array of embeddings with shape (num_videos, hidden_dim)
+        """
+        # Process videos sequentially for reliability
+        # (batching videos is complex due to variable lengths)
+        embeddings = []
+        
+        for video_path in video_paths:
+            embedding = self.embed_video(video_path, prompt=prompt)
+            embeddings.append(embedding)
+        
+        # Stack into 2D array
+        result = np.stack(embeddings, axis=0)
+        
+        # Cache for get_embeddings()
+        self._last_computed_embeddings = result
+        
+        return result
+
+    def embed(self, video, prompt=None):
+        """Embed a single video.
+        
+        FiftyOne calls this method for single-sample embedding.
+        Extracts the filepath from the video reader object.
+        
+        Args:
+            video: Video reader object (e.g., FFmpegVideoReader) or string path
+            prompt: Optional text prompt to condition the embedding (str)
+            
+        Returns:
+            numpy array: 1D embedding vector with shape (hidden_dim,)
+        """
+        video_path = self._extract_video_path(video)
+        return self.embed_video(video_path, prompt=prompt)
+    
+    def embed_all(self, videos, prompt=None):
+        """Embed multiple videos.
+        
+        FiftyOne calls this method for batch embedding.
+        Extracts filepaths from video reader objects.
+        
+        Args:
+            videos: List of video reader objects or string paths
+            prompt: Optional text prompt to condition the embeddings (str)
+            
+        Returns:
+            numpy array: 2D embeddings with shape (num_videos, hidden_dim)
+        """
+        video_paths = [self._extract_video_path(video) for video in videos]
+        return self.embed_videos(video_paths, prompt=prompt)
+
+    def get_embeddings(self):
+        """Get the last computed embeddings.
+        
+        Required override for TorchVideoModel to provide embeddings
+        in the expected format for FiftyOne.
+        
+        Returns:
+            numpy array: The last computed embeddings
+            
+        Raises:
+            ValueError: If no embeddings have been computed yet
+        """
+        # Check if embeddings capability is enabled
+        if not self.has_embeddings:
+            raise ValueError("This model instance does not expose embeddings")
+        
+        # Check if embeddings have been computed
+        if self._last_computed_embeddings is None:
+            raise ValueError(
+                "No embeddings have been computed yet. "
+                "Call embed_video() or embed_videos() first."
+            )
+        
+        # Return the stored embeddings
+        return self._last_computed_embeddings
+
+
+    
     def predict(self, arg, sample=None):
         """Run inference on a video file.
         
@@ -443,20 +732,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
                     prompt = str(field_value)
         
         # Build messages in Qwen3-VL format
-        # Video is passed as file path, model handles frame extraction internally
-        messages = [{
-            "role": "user",
-            "content": [
-                {
-                    "video": sample.filepath,
-                    "total_pixels": self.config.total_pixels,
-                    "min_pixels": self.config.min_pixels,
-                    "max_frames": self.config.max_frames,
-                    "sample_fps": self.config.sample_fps
-                },
-                {"type": "text", "text": prompt}
-            ]
-        }]
+        messages = self._build_video_message(sample.filepath, prompt)
         
         # Run inference and parse results
         output_text = self._run_inference(messages)
@@ -471,11 +747,9 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         """Run model inference on processed messages.
         
         Handles the complete inference pipeline:
-        1. Apply chat template to format messages
-        2. Process video (extract and encode frames)
-        3. Prepare model inputs and move to device
-        4. Generate response
-        5. Decode output text
+        1. Prepare inputs (video processing, tokenization)
+        2. Generate response
+        3. Decode output text
         
         Args:
             messages: List of message dicts in Qwen3-VL format
@@ -483,39 +757,11 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
         Returns:
             str: Generated text output from model
         """
-        # Step 1: Apply chat template to format conversation
-        text = self._processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        
-        # Step 2: Process vision info - extracts and encodes video frames
-        image_inputs, video_inputs, video_kwargs = process_vision_info(
-            [messages],
-            return_video_kwargs=True,
-            image_patch_size=self.config.image_patch_size,
-            return_video_metadata=True
-        )
-        
-        # Step 3: Unpack video inputs and metadata
-        if video_inputs:
-            video_inputs, video_metadatas = zip(*video_inputs)
-            video_inputs, video_metadatas = list(video_inputs), list(video_metadatas)
-        else:
-            video_metadatas = None
-        
-        # Step 4: Prepare final model inputs and move to device
+        # Prepare inputs using common pipeline
         device = next(self._model.parameters()).device
-        inputs = self._processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            video_metadata=video_metadatas,
-            **video_kwargs,
-            do_resize=False,
-            return_tensors="pt"
-        ).to(device)
+        inputs = self._prepare_processor_inputs(messages, device)
         
-        # Step 5: Generate response with appropriate sampling strategy
+        # Generate response with appropriate sampling strategy
         with torch.no_grad():
             gen_kwargs = {
                 "max_new_tokens": self.config.max_new_tokens,
@@ -533,7 +779,7 @@ class Qwen3VLVideoModel(fom.SamplesMixin, fom.Model):
             
             output_ids = self._model.generate(**inputs, **gen_kwargs)
         
-        # Step 6: Decode generated tokens to text (exclude input prompt)
+        # Decode generated tokens to text (exclude input prompt)
         generated_ids = [
             output_ids[len(input_ids):]
             for input_ids, output_ids in zip(inputs["input_ids"], output_ids)
