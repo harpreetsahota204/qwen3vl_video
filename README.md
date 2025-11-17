@@ -26,6 +26,9 @@ model = foz.load_zoo_model("Qwen/Qwen3-VL-8B-Instruct")
 # Apply to dataset
 dataset.apply_model(model, label_field="analysis")
 
+# Or compute embeddings for video similarity
+dataset.compute_embeddings(model, embeddings_field="qwen_embeddings")
+
 # Launch the FiftyOne App
 session = fo.launch_app(dataset)
 ```
@@ -37,12 +40,13 @@ session = fo.launch_app(dataset)
 - 📦 **Object Tracking** - Track objects across frames with bounding boxes
 - 📝 **Video OCR** - Extract text from frames with spatial locations
 - 🎯 **Comprehensive Analysis** - All of the above in one pass
+- 🧬 **Video Embeddings** - Video-to-video similarity and visualization
 - 🔧 **Custom Prompts** - Full control over model behavior
 
 ## Supported Models
 
 - `Qwen/Qwen3-VL-2B-Instruct` (4-6GB VRAM)
-- `Qwen/Qwen3-VL-4B-Instruct` (8-12GB VRAM) 
+- `Qwen/Qwen3-VL-4B-Instruct` (8-12GB VRAM)
 - `Qwen/Qwen3-VL-8B-Instruct` (16-24GB VRAM) **[Recommended]**
 
 ## Operation Modes
@@ -238,6 +242,175 @@ for sample in dataset.iter_samples(autosave=True):
     sample["primary_activity"] = fo.Classification(label=result["primary_activity"])
 ```
 
+## Video Embeddings
+
+![image](qwen3vl_embeddings.gif)
+
+The model supports generating fixed-dimension embeddings for video similarity analysis and visualization.
+
+### Basic Usage
+
+```python
+import fiftyone as fo
+import fiftyone.zoo as foz
+
+# Load model with pooling strategy
+model = foz.load_zoo_model(
+    "Qwen/Qwen3-VL-8B-Instruct",
+    pooling_strategy="mean"  # Options: "cls", "mean", "max"
+)
+
+# Compute embeddings for entire dataset
+dataset.compute_embeddings(
+    model,
+    embeddings_field="qwen_embeddings",
+    skip_failures=True
+)
+```
+
+### Pooling Strategies
+
+The pooling strategy determines how variable-length video representations are converted to fixed-dimension vectors:
+
+**`"cls"`** - Uses the first token (CLS token)
+- Best for: Following standard BERT-style embeddings
+- Characteristics: Fast, focused on global context
+
+**`"mean"`** - Average pooling across all tokens
+- Best for: Capturing overall content uniformly
+- Characteristics: Smooth, balanced representation
+
+**`"max"`** - Max pooling across tokens
+- Best for: Emphasizing salient features
+- Characteristics: Highlights distinctive elements
+
+```python
+# Try different pooling strategies
+for strategy in ["cls", "mean", "max"]:
+    model.pooling_strategy = strategy
+    dataset.compute_embeddings(
+        model,
+        embeddings_field=f"qwen_embeddings_{strategy}"
+    )
+```
+
+### Visualization with UMAP
+
+Visualize video embeddings in 2D/3D space:
+
+```python
+import fiftyone.brain as fob
+
+# Compute UMAP visualization
+results = fob.compute_visualization(
+    dataset,
+    method="umap",  # Also supports "tsne", "pca"
+    brain_key="qwen_viz",
+    embeddings="qwen_embeddings",
+    num_dims=2  # or 3 for 3D
+)
+
+# Launch app with visualization
+session = fo.launch_app(dataset)
+```
+
+### Video-to-Video Similarity
+
+Find similar videos based on visual content:
+
+```python
+import fiftyone.brain as fob
+
+# Build similarity index
+fob.compute_similarity(
+    dataset,
+    brain_key="qwen_similarity",
+    embeddings="qwen_embeddings"
+)
+
+# Find videos similar to a specific sample
+query_sample = dataset.first()
+similar_view = dataset.sort_by_similarity(
+    query_sample,
+    k=10,  # Return 10 most similar videos
+    brain_key="qwen_similarity"
+)
+
+session = fo.launch_app(similar_view)
+```
+
+### Important Notes
+
+⚠️ **Text-to-video search is NOT supported** - You can only do video-to-video similarity (find similar videos based on a reference video). Text queries to search videos are not available.
+
+✅ **Pooling strategy affects embeddings** - Different pooling methods produce different embedding spaces. Experiment to find what works best for your videos.
+
+```python
+# Compare different pooling strategies
+for strategy in ["cls", "mean", "max"]:
+    model.pooling_strategy = strategy
+    dataset.compute_embeddings(
+        model,
+        embeddings_field=f"qwen_embeddings_{strategy}"
+    )
+```
+
+### Complete Example
+
+```python
+import fiftyone as fo
+import fiftyone.zoo as foz
+import fiftyone.brain as fob
+from fiftyone.utils.huggingface import load_from_hub
+
+# Load dataset
+dataset = load_from_hub(
+    "harpreetsahota/random_short_videos",
+    dataset_name="random_short_videos"
+)
+dataset.compute_metadata()
+
+# Register model source
+foz.register_zoo_model_source(
+    "https://github.com/harpreetsahota204/qwen3vl_video",
+    overwrite=True
+)
+
+# Load model with specific pooling
+model = foz.load_zoo_model(
+    "Qwen/Qwen3-VL-8B-Instruct",
+    total_pixels=2048*32*32,
+    max_frames=120,
+    pooling_strategy="max"
+)
+
+# Compute embeddings
+dataset.compute_embeddings(
+    model,
+    embeddings_field="qwen_embeddings",
+    skip_failures=True
+)
+
+# Visualize with UMAP
+fob.compute_visualization(
+    dataset,
+    method="umap",
+    brain_key="qwen_viz",
+    embeddings="qwen_embeddings",
+    num_dims=2
+)
+
+# Build similarity index
+fob.compute_similarity(
+    dataset,
+    brain_key="qwen_similarity",
+    embeddings="qwen_embeddings"
+)
+
+# Launch app
+session = fo.launch_app(dataset)
+```
+
 ## Dynamic Reconfiguration
 
 The model supports dynamic property changes without reloading:
@@ -285,6 +458,9 @@ model.repetition_penalty = 1.0
 # Operation
 model.operation = "comprehensive"  # or other modes
 model.custom_prompt = "..."  # for custom operation
+
+# Embeddings
+model.pooling_strategy = "max"  # Options: "cls", "mean", "max"
 ```
 
 ## Installation
@@ -298,7 +474,7 @@ pip install fiftyone
 When you first load the model, FiftyOne will automatically install:
 - `transformers>=4.37.0`
 - `torch`
-- `torchvision` 
+- `torchvision`
 - `qwen-vl-utils`
 - `decord`
 
