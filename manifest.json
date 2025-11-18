@@ -15,7 +15,8 @@
                 "torch",
                 "temporal-detections",
                 "zero-shot",
-                "video"
+                "video",
+                "embeddings"
             ],
             "date_added": "2025-11-10",
             "requirements": {
@@ -41,7 +42,8 @@
                 "torch",
                 "temporal-detections",
                 "zero-shot",
-                "video"
+                "video",
+                "embeddings"
             ],
             "date_added": "2025-11-10",
             "requirements": {
@@ -67,7 +69,8 @@
                 "torch",
                 "temporal-detections",
                 "zero-shot",
-                "video"
+                "video",
+                "embeddings"
             ],
             "date_added": "2025-11-10",
             "requirements": {

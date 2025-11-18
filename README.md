@@ -6,6 +6,8 @@ A FiftyOne zoo model integration for Qwen3-VL that enables comprehensive video u
 
 ## Quick Start
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harpreetsahota204/qwen3vl_video/blob/main/qwen3vl_fiftyone_demo.ipynb)
+
 ```python
 import fiftyone as fo
 import fiftyone.zoo as foz
